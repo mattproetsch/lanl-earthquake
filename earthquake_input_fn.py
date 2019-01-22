@@ -89,7 +89,7 @@ def earthquake_input_fn2(basedir, batch_size, timesteps, scales=None, traintest=
     if type(scales) is str:
         scales = [scales]
     for x in scales:
-        assert x in possible_scales, 'invalid scale %s, try ["1e0, 1e-2"], "1e1", etc.' % x
+        assert x in possible_scales, 'invalid scale %s, try ["1e0", "1e-2"], "1e1", etc.' % x
         files.extend(glob(osp.join(basedir, traintest, x, '*.tfrecords')))
     
     dataset = tf.data.Dataset.from_tensor_slices(files)
@@ -126,11 +126,10 @@ def earthquake_input_fn2_prediction(basedir, batch_size, timesteps, num_files=No
     if type(scales) is str:
         scales = [scales]
     for x in scales:
-        assert x in possible_scales, 'invalid scale %s, try ["1e0, 1e-2"], "1e1", etc.' % x
+        assert x in possible_scales, 'invalid scale %s, try ["1e0", "1e-2"], "1e1", etc.' % x
         files.extend(glob(osp.join(basedir, traintest, x, '*.tfrecords')))
     
-    files = np.random.permutation(files)[:num_files]
-    dataset = tf.data.Dataset.from_tensor_slices(files)
+    dataset = tf.data.Dataset.from_tensor_slices(files[:num_files])
     dataset = tf.data.TFRecordDataset(dataset, num_parallel_reads=24)
     
     # Turn each input example into a series of 4096/(timesteps) sub-examples
