@@ -10,6 +10,8 @@ def lstm_model_fn(features, labels, mode, params):
     lstm_cell_size = params['lstm_cell_size']
     learning_rate = params['learning_rate']
     dropout_rate = params['dropout_rate']
+    lambda_l2_reg = params['lambda_l2_reg']
+    
     N_sub_batches = int(4096 / timesteps)
     
     print('FEATURES')
@@ -23,12 +25,9 @@ def lstm_model_fn(features, labels, mode, params):
     print('-' * 20)
     
     # Create input layer from features and feature columns
-    input_layer = tf.feature_column.input_layer(features, feature_columns)
-    
-    # Below doesn't work: input_layer will *always* cast data to tf.float32 before handing it over to us.
-    #if mode == tf.estimator.ModeKeys.PREDICT:
-    #    labels_input_layer = tf.feature_column.input_layer(features, params['label_input_column'], trainable=False)
-    #    labels_input_layer = tf.reshape(labels_input_layer, (batch_size, timesteps))
+    with tf.variable_scope('input'):
+        input_layer = tf.feature_column.input_layer(features, feature_columns)
+        rnn_input = tf.cast(tf.reshape(input_layer, (batch_size, timesteps, 1)), tf.float64)
     
     # Create LSTM layers
     with tf.variable_scope('lstm_structures', reuse=tf.AUTO_REUSE):
@@ -52,16 +51,17 @@ def lstm_model_fn(features, labels, mode, params):
 
 
         if mode == tf.estimator.ModeKeys.TRAIN:
-            lstm_cell_fwd = tf.nn.rnn_cell.DropoutWrapper(lstm_cell_fwd_m,
-                                                          input_keep_prob=dropout_rate,
-                                                          variational_recurrent=True,
-                                                          input_size=1,
-                                                          dtype=tf.float64)
-            lstm_cell_bck = tf.nn.rnn_cell.DropoutWrapper(lstm_cell_bck_m,
-                                                          input_keep_prob=dropout_rate,
-                                                          variational_recurrent=True,
-                                                          input_size=1,
-                                                          dtype=tf.float64)
+            
+            lstm_cell_fwd_m = tf.nn.rnn_cell.DropoutWrapper(lstm_cell_fwd_m,
+                                                            input_keep_prob=dropout_rate,
+                                                            variational_recurrent=True,
+                                                            input_size=1,
+                                                            dtype=tf.float64)
+            lstm_cell_bck_m = tf.nn.rnn_cell.DropoutWrapper(lstm_cell_bck_m,
+                                                            input_keep_prob=dropout_rate,
+                                                            variational_recurrent=True,
+                                                            input_size=1,
+                                                            dtype=tf.float64)
     
     # Set up variable schemes
     with tf.variable_scope('lstm_state', reuse=tf.AUTO_REUSE):
@@ -134,9 +134,6 @@ def lstm_model_fn(features, labels, mode, params):
 
             control_ops.extend([assign_fwd_c, assign_fwd_h, assign_bck_c, assign_bck_h])
     
-    
-    rnn_input = tf.cast(tf.reshape(input_layer, (batch_size, timesteps, 1)), tf.float64)
-    
     with tf.control_dependencies(control_ops):
         with tf.variable_scope('bi_rnn'):
             (outputs, states) = tf.nn.bidirectional_dynamic_rnn(cell_fw=lstm_cell_fwd_m,
@@ -156,35 +153,59 @@ def lstm_model_fn(features, labels, mode, params):
                 tf.assign(init_state_bck_cs[i], states[1][i][0])
                 tf.assign(init_state_bck_hs[i], states[1][i][1])
     
-    final_rnn_output = tf.reshape(tf.concat(outputs, axis=0), (batch_size, 2 * timesteps * lstm_cell_size[-1]))
+    
+    final_rnn_output = tf.reshape(tf.concat(outputs, axis=2), (batch_size, 2 * timesteps * lstm_cell_size[-1]))
     
     # Pass through a Dense layer
     with tf.variable_scope('dense_head'):
         dense = tf.layers.Dense(units=timesteps,
-                                activation=None,
+                                activation=tf.nn.relu,
                                 name='dense_layer',
                                 dtype=tf.float64)(final_rnn_output)
+        
+        if mode == tf.estimator.ModeKeys.TRAIN:
+            dense = tf.layers.Dropout(rate=dropout_rate)(dense)
+            
+        dense = tf.layers.Dense(units=timesteps,
+                                activation=None,
+                                name='dense_layer2',
+                                dtype=tf.float64)(dense)
+        
+        if mode == tf.estimator.ModeKeys.TRAIN:
+            dense = tf.layers.Dropout(rate=dropout_rate)(dense)
+            
+        dense = tf.layers.Dense(units=timesteps,
+                                activation=None,
+                                name='dense_layer2',
+                                dtype=tf.float64)(dense)
     
     # Reshape dense outputs to same shape as `labels'
     results = tf.reshape(dense, (batch_size, timesteps))
     
     if mode == tf.estimator.ModeKeys.PREDICT:
         predictions = {
-            #'labels': labels_input_layer,  # can't pass this through because tf.input_layer only allows float32
             'pred': results
         }
         return tf.estimator.EstimatorSpec(mode, predictions=predictions, prediction_hooks=[ModelStepTrackerHook()])
         
     # Compute loss.
     with tf.variable_scope('loss_sse'):
-        loss = tf.reduce_sum(tf.square(labels - results), name='loss_sse')
+        loss = tf.reduce_sum(tf.square(labels[:,-1] - results[:,-1]), name='loss_sse')
+        l2 = lambda_l2_reg * sum(
+            tf.nn.l2_loss(tf_var)
+                for tf_var in tf.trainable_variables()
+                if not ("noreg" in tf_var.name or "Bias" in tf_var.name \
+                        or "input" in tf_var.name or "step_counter" in tf_var.name \
+                        or "bias" in tf_var.name)
+        )
+        loss += l2
 
     # Compute evaluation metrics.
-    mse_op = tf.metrics.mean_squared_error(labels=labels,
-                                           predictions=results,
+    mse_op = tf.metrics.mean_squared_error(labels=labels[:,-1],
+                                           predictions=results[:,-1],
                                            name='mse_op')
-    mae_op = tf.metrics.mean_absolute_error(labels=labels,
-                                            predictions=results,
+    mae_op = tf.metrics.mean_absolute_error(labels=labels[:,-1],
+                                            predictions=results[:,-1],
                                             name='mae_op')
     tf.summary.scalar('mse', mse_op[1])
     tf.summary.scalar('mae', mae_op[1])
@@ -195,9 +216,10 @@ def lstm_model_fn(features, labels, mode, params):
     
     
     assert mode == tf.estimator.ModeKeys.TRAIN, 'invalid mode key: ' + str(mode)
+    
     # Create train op
     with tf.variable_scope('optimization'):
         optimizer = tf.train.RMSPropOptimizer(learning_rate=learning_rate)
         train_op = optimizer.minimize(loss, global_step=tf.train.get_global_step())
+            
     return tf.estimator.EstimatorSpec(mode, loss=loss, train_op=train_op, training_hooks=[ModelStepTrackerHook()])
-
