@@ -1,5 +1,25 @@
 import tensorflow as tf
 from hooks import ModelStepTrackerHook
+
+def build_dropout_lstm_cell(num_units, activation, reuse,
+                            dtype, timesteps, dropout_rate,
+                            name, mode):
+    cell = tf.nn.rnn_cell.LSTMCell(num_units=num_units,
+                                   activation=activation,
+                                   reuse=reuse,
+                                   dtype=dtype,
+                                   name=name + '_cell')
+    #cell = tf.contrib.rnn.AttentionCellWrapper(cell,
+    #                                           attn_length=timesteps,
+    #                                           reuse=reuse,
+    #                                           state_is_tuple=True)    
+    if mode == tf.estimator.ModeKeys.TRAIN:
+        cell = tf.contrib.rnn.DropoutWrapper(cell,
+                                             input_keep_prob=dropout_rate,
+                                             variational_recurrent=True,
+                                             input_size=1,
+                                             dtype=tf.float64)
+    return cell
         
 def lstm_model_fn(features, labels, mode, params):
     
@@ -30,38 +50,26 @@ def lstm_model_fn(features, labels, mode, params):
         rnn_input = tf.cast(tf.reshape(input_layer, (batch_size, timesteps, 1)), tf.float64)
     
     # Create LSTM layers
+    lstm_cells_fwd = []
+    lstm_cells_bck = []
     with tf.variable_scope('lstm_structures', reuse=tf.AUTO_REUSE):
-        lstm_cell_fwd_cells = [tf.nn.rnn_cell.LSTMCell(num_units=cell_sz,
-                                                       activation=tf.nn.leaky_relu,
-                                                       reuse=False,
-                                                       dtype=tf.float64,
-                                                       name='lstm_cell_fwd_%d' % i) for i, cell_sz in enumerate(lstm_cell_size)]
+        for i, cell_sz in enumerate(lstm_cell_size):
+            
+            new_cell_fwd = build_dropout_lstm_cell(cell_sz, activation=tf.nn.leaky_relu, reuse=False,
+                                                   dtype=tf.float64, timesteps=timesteps, dropout_rate=dropout_rate,
+                                                   name='lstm_cell_fwd_%d' % i, mode=mode)
+            lstm_cells_fwd.append(new_cell_fwd)
+            
+            new_cell_bck = build_dropout_lstm_cell(cell_sz, activation=tf.nn.leaky_relu, reuse=False,
+                                                   dtype=tf.float64, timesteps=timesteps, dropout_rate=dropout_rate,
+                                                   name='lstm_cell_bck_%d' % i, mode=mode)
+            lstm_cells_bck.append(new_cell_bck)
 
-        lstm_cell_bck_cells = [tf.nn.rnn_cell.LSTMCell(num_units=cell_sz,
-                                                       activation=tf.nn.leaky_relu,
-                                                       reuse=False,
-                                                       dtype=tf.float64,
-                                                       name='lstm_cell_bck_%d' % i) for i, cell_sz in enumerate(lstm_cell_size)]
-
-        lstm_cell_fwd_m = tf.nn.rnn_cell.MultiRNNCell(lstm_cell_fwd_cells)
-        lstm_cell_bck_m = tf.nn.rnn_cell.MultiRNNCell(lstm_cell_bck_cells)
+        lstm_cell_fwd_m = tf.nn.rnn_cell.MultiRNNCell(lstm_cells_fwd)
+        lstm_cell_bck_m = tf.nn.rnn_cell.MultiRNNCell(lstm_cells_bck)
 
         init_state = [lstm_cell_fwd_m.zero_state(batch_size, dtype=tf.float64),
                       lstm_cell_bck_m.zero_state(batch_size, dtype=tf.float64)]
-
-
-        if mode == tf.estimator.ModeKeys.TRAIN:
-            
-            lstm_cell_fwd_m = tf.nn.rnn_cell.DropoutWrapper(lstm_cell_fwd_m,
-                                                            input_keep_prob=dropout_rate,
-                                                            variational_recurrent=True,
-                                                            input_size=1,
-                                                            dtype=tf.float64)
-            lstm_cell_bck_m = tf.nn.rnn_cell.DropoutWrapper(lstm_cell_bck_m,
-                                                            input_keep_prob=dropout_rate,
-                                                            variational_recurrent=True,
-                                                            input_size=1,
-                                                            dtype=tf.float64)
     
     # Set up variable schemes
     with tf.variable_scope('lstm_state', reuse=tf.AUTO_REUSE):
@@ -159,7 +167,7 @@ def lstm_model_fn(features, labels, mode, params):
     # Pass through a Dense layer
     with tf.variable_scope('dense_head'):
         dense = tf.layers.Dense(units=timesteps,
-                                activation=tf.nn.relu,
+                                activation=tf.nn.leaky_relu,
                                 name='dense_layer',
                                 dtype=tf.float64)(final_rnn_output)
         
@@ -167,7 +175,7 @@ def lstm_model_fn(features, labels, mode, params):
             dense = tf.layers.Dropout(rate=dropout_rate)(dense)
             
         dense = tf.layers.Dense(units=timesteps,
-                                activation=None,
+                                activation=tf.nn.leaky_relu,
                                 name='dense_layer2',
                                 dtype=tf.float64)(dense)
         
@@ -176,7 +184,7 @@ def lstm_model_fn(features, labels, mode, params):
             
         dense = tf.layers.Dense(units=timesteps,
                                 activation=None,
-                                name='dense_layer2',
+                                name='dense_layer3',
                                 dtype=tf.float64)(dense)
     
     # Reshape dense outputs to same shape as `labels'
