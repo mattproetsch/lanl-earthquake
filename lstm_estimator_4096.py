@@ -32,8 +32,13 @@ def lstm_4096_model_fn(features, labels, mode, params):
     dropout_rate = params['dropout_rate']
     lambda_l2_reg = params['lambda_l2_reg']
     dense_size = params['dense_size']
+    time_pool = params['time_pool']
+    cnn_size = params['cnn_size']
     
     N_sub_batches = int(4096 / timesteps)
+    
+    if not all(map(lambda x: x == lstm_cell_size[-1], lstm_cell_size)):
+        raise Exception('All LSTM cells have to be the same size in the CudnnLSTM, got: ' + str(lstm_cell_size))
     
     print('FEATURES')
     print(features)
@@ -47,17 +52,30 @@ def lstm_4096_model_fn(features, labels, mode, params):
     
     # Create input layer from features and feature columns
     with tf.variable_scope('input'):
-        input_layer = tf.feature_column.input_layer(features, feature_columns) #(batch_size, timesteps)
-        rnn_input = tf.unstack(input_layer, axis=1) #([batch_size, 1] * timesteps)
-        rnn_input = tf.cast(tf.reshape(tf.stack(rnn_input, axis=0), (timesteps, batch_size, 1)), tf.float32)
-        print(rnn_input)
+        input_layer = tf.reshape(tf.feature_column.input_layer(features, feature_columns), (batch_size, timesteps)) #(batch_size, timesteps)
+    
+    with tf.variable_scope('rnn_input'):
+        # take max absolute val every time_pool steps
+        # for 4096 input w/ time_pool=8, we take abs max of every 8 timesteps for a resulting dimension of (batch_size, 4096/8=512)
+        num_splits = int(timesteps/time_pool)
+        rnn_input = tf.cast(input_layer, tf.float32)
+        print('num_splits=%d (this is the number of timesteps fed to RNN)' % num_splits)
+        rnn_input = tf.split(input_layer, num_or_size_splits=num_splits, axis=1)               #([batch_size, time_pool] * num_splits)
+        rnn_input = tf.stack(rnn_input, axis=1)                                                #(batch_size, num_splits, time_pool))
+        am = tf.argmax(tf.abs(rnn_input), axis=2)                                              #(batch_size, num_splits)
+        am_expanded = tf.one_hot(am, depth=time_pool, axis=-1)                                 #(batch_size, num_splits, time_pool)
+        rnn_input = tf.reduce_sum(tf.multiply(am_expanded, rnn_input), axis=2, keepdims=True)  #(batch_size, num_splits)
+        print('rnn_input', rnn_input)
+    
+    with tf.variable_scope('cnn_input'):
+        # just reshape for CNN
+        cnn_input = tf.cast(tf.reshape(input_layer, (batch_size, timesteps, 1)), tf.float32)  #(batch_size, timesteps, 1)
+        print('cnn_input', cnn_input)
     
     # Create LSTM layers
-    lstm_cells_fwd = []
-    lstm_cells_bck = []
     with tf.variable_scope('lstm_structures', reuse=tf.AUTO_REUSE):
         lstm = tf.contrib.cudnn_rnn.CudnnLSTM(len(lstm_cell_size),
-                                              lstm_cell_size[0],
+                                              lstm_cell_size[-1],
                                               dropout=dropout_rate,
                                               direction='bidirectional',
                                               dtype=tf.float32)
@@ -69,9 +87,23 @@ def lstm_4096_model_fn(features, labels, mode, params):
     with tf.variable_scope('bi_rnn'):
         outputs, state = lstm(rnn_input)
     
-    print(outputs)
-    final_rnn_output = tf.reshape(tf.concat(outputs, axis=2), (batch_size, 2 * timesteps * lstm_cell_size[-1]))
-    dense = tf.cast(final_rnn_output, tf.float64)
+    print('rnn_outputs', outputs)
+    final_rnn_output = tf.reshape(tf.concat(outputs, axis=2), (batch_size, 2 * num_splits * lstm_cell_size[-1]))
+    
+    # Create CNN layers
+    with tf.variable_scope('cnn_structures'):
+        cnn = cnn_input
+        for cnn_filter, cnn_kernel in cnn_size:
+            cnn = tf.layers.Conv1D(filters=cnn_filter, kernel_size=cnn_kernel, padding='same', activation=tf.nn.leaky_relu)(cnn)
+            cnn = tf.layers.MaxPooling1D(2, 2)(cnn)
+            if mode == tf.estimator.ModeKeys.TRAIN:
+                cnn = tf.layers.Dropout(rate=dropout_rate)(cnn)
+            
+    print(cnn)
+    final_cnn_output = tf.reshape(cnn, (batch_size, int(timesteps) * int(int(cnn_size[-1][0]) / int(2**len(cnn_size)))))
+    print(final_cnn_output)
+    
+    dense = tf.cast(tf.concat([final_rnn_output, final_cnn_output], axis=1), tf.float64)
     
     # Pass through a Dense layer(s)
     with tf.variable_scope('dense_head'):
