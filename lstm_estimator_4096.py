@@ -31,6 +31,7 @@ def lstm_4096_model_fn(features, labels, mode, params):
     learning_rate = params['learning_rate']
     dropout_rate = params['dropout_rate']
     lambda_l2_reg = params['lambda_l2_reg']
+    grad_clip = params['grad_clip']
     dense_size = params['dense_size']
     time_pool = params['time_pool']
     cnn_size = params['cnn_size']
@@ -100,7 +101,7 @@ def lstm_4096_model_fn(features, labels, mode, params):
                 cnn = tf.layers.Dropout(rate=dropout_rate)(cnn)
             
     print(cnn)
-    final_cnn_output = tf.reshape(cnn, (batch_size, int(timesteps) * int(int(cnn_size[-1][0]) / int(2**len(cnn_size)))))
+    final_cnn_output = tf.reshape(cnn, (batch_size, int(int(cnn_size[-1][0])) * int(int(timesteps) / int(2**len(cnn_size)))))
     print(final_cnn_output)
     
     dense = tf.cast(tf.concat([final_rnn_output, final_cnn_output], axis=1), tf.float64)
@@ -165,18 +166,18 @@ def lstm_4096_model_fn(features, labels, mode, params):
     
     # Create train op
     with tf.variable_scope('optimization'):
-        optimizer = tf.train.RMSPropOptimizer(learning_rate=learning_rate)
-        gradient_var_pairs = optimizer.compute_gradients(loss)
-        gvps = list(filter(lambda gvp: gvp[0] is not None, gradient_var_pairs))
-        vars = [x[1] for x in gvps]
-        grad_dtypes = [x[0].dtype for x in gvps]
-        gradients = [tf.cast(x[0], tf.float64) for x in gvps]
-        #print('GRADIENTS:\n\t' + '\n\t'.join(list(map(str, gradients))))
-        clipped, _ = tf.clip_by_global_norm(gradients, 0.5)
-        #print('CLIPPED  :\n\t' + '\n\t'.join(list(map(str, clipped))))
-        tf.summary.histogram('grad_norm', tf.global_norm(clipped))
-        clipped = [tf.cast(g, grad_dtypes[i]) for i, g in enumerate(clipped)]
-        train_op = optimizer.apply_gradients(zip(clipped, vars), global_step=tf.train.get_global_step())
-        #train_op = optimizer.minimize(loss, global_step=tf.train.get_global_step())
+        optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
+        # gradient_var_pairs = optimizer.compute_gradients(loss)
+        # gvps = list(filter(lambda gvp: gvp[0] is not None, gradient_var_pairs))
+        # vars = [x[1] for x in gvps]
+        # grad_dtypes = [x[0].dtype for x in gvps]
+        # gradients = [tf.cast(x[0], tf.float64) for x in gvps]
+        # #print('GRADIENTS:\n\t' + '\n\t'.join(list(map(str, gradients))))
+        # clipped, _ = tf.clip_by_global_norm(gradients, grad_clip)
+        # #print('CLIPPED  :\n\t' + '\n\t'.join(list(map(str, clipped))))
+        # tf.summary.histogram('grad_norm', tf.global_norm(clipped))
+        # clipped = [tf.cast(g, grad_dtypes[i]) for i, g in enumerate(clipped)]
+        # train_op = optimizer.apply_gradients(zip(clipped, vars), global_step=tf.train.get_global_step())
+        train_op = optimizer.minimize(loss, global_step=tf.train.get_global_step())
             
     return tf.estimator.EstimatorSpec(mode, loss=loss, train_op=train_op, training_hooks=[ModelStepTrackerHook()])

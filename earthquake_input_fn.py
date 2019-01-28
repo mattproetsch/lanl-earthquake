@@ -15,9 +15,10 @@ def _deserialize_earthquakes2(serialized_examples):
         features=features
     )
     
-    features['tminus'] = tf.strings.to_number(string_tensor=features['tminus'], out_type=tf.float64) / 5515.0
+    features['tminus'] = tf.strings.to_number(string_tensor=features['tminus'], out_type=tf.float64)
+    features['acousticdata'] = tf.cast(features['acousticdata'], tf.float32)
     
-    return tf.data.Dataset.from_tensor_slices(({'acousticdata': features['acousticdata']}, features['tminus'] / 16.10))
+    return tf.data.Dataset.from_tensor_slices(({'acousticdata': features['acousticdata'] / 5515.0}, features['tminus'] / 16.10))
 
 def earthquake_input_fn2(basedir, batch_size, timesteps, scales=None, traintest='none', eager=False, seed=1234):
     """
