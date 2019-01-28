@@ -19,21 +19,6 @@ def _deserialize_earthquakes2(serialized_examples):
     
     return tf.data.Dataset.from_tensor_slices(({'acousticdata': features['acousticdata']}, features['tminus'] / 60.0))
 
-def _deserialize_earthquakes2_predict(serialized_examples):
-    features = {
-        'acousticdata': tf.FixedLenFeature((4096), tf.int64),
-        'tminus': tf.FixedLenFeature((4096), tf.string)
-    }
-    features = tf.io.parse_single_example(
-        serialized_examples,
-        features=features
-    )
-    
-    features['tminus'] = tf.strings.to_number(string_tensor=features['tminus'], out_type=tf.float64)
-    
-    return tf.data.Dataset.from_tensor_slices({'acousticdata': features['acousticdata'], 'tminus': features['tminus'] / 60.0})
-
-
 def earthquake_input_fn2(basedir, batch_size, timesteps, scales=None, traintest='none', eager=False, seed=1234):
     """
     `scales` argument should be a list of '1eX', where X can range from -8 to 2
@@ -53,7 +38,7 @@ def earthquake_input_fn2(basedir, batch_size, timesteps, scales=None, traintest=
     if traintest == 'train':
         np.random.seed(np.int64(time()))
     else:
-        np.random.seed(np.int64(seed)) # deterministic seed for consistent eval
+        np.random.seed(np.int64(seed))  # deterministic seed for consistent eval
         
     files = np.random.permutation(files)
         
@@ -70,7 +55,7 @@ def earthquake_input_fn2(basedir, batch_size, timesteps, scales=None, traintest=
                                                                      block_length=timesteps))
     
     dataset = dataset.batch(timesteps).batch(batch_size)
-    dataset = dataset.prefetch(N_sub_batches * 2)
+    dataset = dataset.prefetch(2)
     
     if eager:
         return dataset
@@ -78,37 +63,3 @@ def earthquake_input_fn2(basedir, batch_size, timesteps, scales=None, traintest=
     data_iter = dataset.make_one_shot_iterator()
     return data_iter.get_next()
 
-def earthquake_input_fn2_prediction(basedir, batch_size, timesteps, num_files=None, scales=None, traintest='none', eager=False):
-    """
-    `scales` argument should be a list of '1eX', where X can range from -8 to 2
-    """
-    
-    assert traintest in ['train', 'test'], 'must specify traintest as "train" or "test"'
-    assert 4096 % timesteps == 0, 'timesteps must evenly divide 4096'
-    assert type(num_files) is int, 'num_files must be an int'
-    possible_scales = ['1e%d' % d for d in range(-9, 4+1)]
-    
-    files = []
-    if type(scales) is str:
-        scales = [scales]
-    for x in scales:
-        assert x in possible_scales, 'invalid scale %s, try ["1e0", "1e-2"], "1e1", etc.' % x
-        files.extend(glob(osp.join(basedir, traintest, x, '*.tfrecords')))
-    
-    dataset = tf.data.Dataset.from_tensor_slices(files[:num_files])
-    dataset = tf.data.TFRecordDataset(dataset, num_parallel_reads=24)
-    
-    # Turn each input example into a series of 4096/(timesteps) sub-examples
-    N_sub_batches = int(4096 / timesteps)    
-    dataset = dataset.apply(tf.data.experimental.parallel_interleave(lambda x: _deserialize_earthquakes2_predict(x),
-                                                                     cycle_length=batch_size,
-                                                                     block_length=timesteps))
-    
-    dataset = dataset.batch(timesteps).batch(batch_size)
-    dataset = dataset.prefetch(N_sub_batches * 2)
-    
-    if eager:
-        return dataset
-    
-    data_iter = dataset.make_one_shot_iterator()
-    return data_iter.get_next()

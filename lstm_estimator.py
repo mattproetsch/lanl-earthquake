@@ -31,6 +31,7 @@ def lstm_model_fn(features, labels, mode, params):
     learning_rate = params['learning_rate']
     dropout_rate = params['dropout_rate']
     lambda_l2_reg = params['lambda_l2_reg']
+    dense_size = params['dense_size']
     
     N_sub_batches = int(4096 / timesteps)
     
@@ -55,12 +56,12 @@ def lstm_model_fn(features, labels, mode, params):
     with tf.variable_scope('lstm_structures', reuse=tf.AUTO_REUSE):
         for i, cell_sz in enumerate(lstm_cell_size):
             
-            new_cell_fwd = build_dropout_lstm_cell(cell_sz, activation=tf.nn.leaky_relu, reuse=False,
+            new_cell_fwd = build_dropout_lstm_cell(cell_sz, activation=tf.nn.tanh, reuse=False,
                                                    dtype=tf.float64, timesteps=timesteps, dropout_rate=dropout_rate,
                                                    name='lstm_cell_fwd_%d' % i, mode=mode)
             lstm_cells_fwd.append(new_cell_fwd)
             
-            new_cell_bck = build_dropout_lstm_cell(cell_sz, activation=tf.nn.leaky_relu, reuse=False,
+            new_cell_bck = build_dropout_lstm_cell(cell_sz, activation=tf.nn.tanh, reuse=False,
                                                    dtype=tf.float64, timesteps=timesteps, dropout_rate=dropout_rate,
                                                    name='lstm_cell_bck_%d' % i, mode=mode)
             lstm_cells_bck.append(new_cell_bck)
@@ -73,19 +74,19 @@ def lstm_model_fn(features, labels, mode, params):
     
     # Set up variable schemes
     with tf.variable_scope('lstm_state', reuse=tf.AUTO_REUSE):
-        init_state_fwd_c_zeros = [tf.get_variable('init_state_fwd_c_zero_%d' % i, 
+        init_state_fwd_c_zeros = [tf.get_variable('init_state_fwd_c_zero_%d' % i,
                                                   shape=(batch_size, cell_sz),
                                                   dtype=tf.float64,
                                                   trainable=False) for i, cell_sz in enumerate(lstm_cell_size)]
-        init_state_fwd_h_zeros = [tf.get_variable('init_state_fwd_h_zero_%d' % i, 
+        init_state_fwd_h_zeros = [tf.get_variable('init_state_fwd_h_zero_%d' % i,
                                                   shape=(batch_size, cell_sz),
                                                   dtype=tf.float64,
                                                   trainable=False) for i, cell_sz in enumerate(lstm_cell_size)]
-        init_state_bck_c_zeros = [tf.get_variable('init_state_bck_c_zero_%d' % i, 
+        init_state_bck_c_zeros = [tf.get_variable('init_state_bck_c_zero_%d' % i,
                                                   shape=(batch_size, cell_sz),
                                                   dtype=tf.float64,
                                                   trainable=False) for i, cell_sz in enumerate(lstm_cell_size)]
-        init_state_bck_h_zeros = [tf.get_variable('init_state_bck_h_zero_%d' % i, 
+        init_state_bck_h_zeros = [tf.get_variable('init_state_bck_h_zero_%d' % i,
                                                   shape=(batch_size, cell_sz),
                                                   dtype=tf.float64,
                                                   trainable=False) for i, cell_sz in enumerate(lstm_cell_size)]
@@ -97,20 +98,16 @@ def lstm_model_fn(features, labels, mode, params):
         
         init_state_fwd_cs = [tf.get_variable('init_state_fwd_c_%d' % i, 
                                              shape=(batch_size, cell_sz),
-                                             dtype=tf.float64,
-                                             trainable=False) for i, cell_sz in enumerate(lstm_cell_size)]
+                                             dtype=tf.float64) for i, cell_sz in enumerate(lstm_cell_size)]
         init_state_fwd_hs = [tf.get_variable('init_state_fwd_h_%d' % i, 
                                              shape=(batch_size, cell_sz),
-                                             dtype=tf.float64,
-                                             trainable=False) for i, cell_sz in enumerate(lstm_cell_size)]
+                                             dtype=tf.float64) for i, cell_sz in enumerate(lstm_cell_size)]
         init_state_bck_cs = [tf.get_variable('init_state_bck_c_%d' % i, 
                                              shape=(batch_size, cell_sz),
-                                             dtype=tf.float64,
-                                             trainable=False) for i, cell_sz in enumerate(lstm_cell_size)]
+                                             dtype=tf.float64) for i, cell_sz in enumerate(lstm_cell_size)]
         init_state_bck_hs = [tf.get_variable('init_state_bck_h_%d' % i, 
                                              shape=(batch_size, cell_sz),
-                                             dtype=tf.float64,
-                                             trainable=False) for i, cell_sz in enumerate(lstm_cell_size)]
+                                             dtype=tf.float64) for i, cell_sz in enumerate(lstm_cell_size)]
         
         for i in range(len(lstm_cell_size)):
             tf.assign(init_state_fwd_cs[i], init_state_fwd_c_zeros[i])
@@ -163,28 +160,22 @@ def lstm_model_fn(features, labels, mode, params):
     
     
     final_rnn_output = tf.reshape(tf.concat(outputs, axis=2), (batch_size, 2 * timesteps * lstm_cell_size[-1]))
+    dense = final_rnn_output
     
-    # Pass through a Dense layer
+    # Pass through a Dense layer(s)
     with tf.variable_scope('dense_head'):
-        dense = tf.layers.Dense(units=timesteps,
-                                activation=tf.nn.leaky_relu,
-                                name='dense_layer',
-                                dtype=tf.float64)(final_rnn_output)
-        
-        if mode == tf.estimator.ModeKeys.TRAIN:
-            dense = tf.layers.Dropout(rate=dropout_rate)(dense)
-            
-        dense = tf.layers.Dense(units=timesteps,
-                                activation=tf.nn.leaky_relu,
-                                name='dense_layer2',
-                                dtype=tf.float64)(dense)
-        
-        if mode == tf.estimator.ModeKeys.TRAIN:
-            dense = tf.layers.Dropout(rate=dropout_rate)(dense)
+        for i, dense_sz in enumerate(dense_size):
+            dense = tf.layers.Dense(units=dense_sz,
+                                    activation=tf.nn.leaky_relu,
+                                    name='dense_layer_%d' % i,
+                                    dtype=tf.float64)(dense)
+
+            if mode == tf.estimator.ModeKeys.TRAIN:
+                dense = tf.layers.Dropout(rate=dropout_rate)(dense)
             
         dense = tf.layers.Dense(units=timesteps,
                                 activation=None,
-                                name='dense_layer3',
+                                name='dense_layer_out',
                                 dtype=tf.float64)(dense)
     
     # Reshape dense outputs to same shape as `labels'
@@ -228,6 +219,18 @@ def lstm_model_fn(features, labels, mode, params):
     # Create train op
     with tf.variable_scope('optimization'):
         optimizer = tf.train.RMSPropOptimizer(learning_rate=learning_rate)
-        train_op = optimizer.minimize(loss, global_step=tf.train.get_global_step())
+        gradient_var_pairs = optimizer.compute_gradients(loss)
+        vars = [x[1] for x in filter(lambda gvp: gvp[0] is not None, gradient_var_pairs)]
+        gradients = [x[0] for x in filter(lambda gvp: gvp[0] is not None, gradient_var_pairs)]
+        print('GRADIENTS:\n\t' + '\n\t'.join(list(map(str, gradients))))
+        #tf.summary.histogram('gradients', gradients)
+        #if self.config.gradient_clip > 0:
+        clipped, _ = tf.clip_by_global_norm(gradients, 0.5)
+        #else:
+        #clipped = gradients
+
+        tf.summary.histogram('grad_norm', tf.global_norm(clipped))
+        train_op = optimizer.apply_gradients(zip(clipped, vars), global_step=tf.train.get_global_step())
+        #train_op = optimizer.minimize(loss, global_step=tf.train.get_global_step())
             
     return tf.estimator.EstimatorSpec(mode, loss=loss, train_op=train_op, training_hooks=[ModelStepTrackerHook()])
