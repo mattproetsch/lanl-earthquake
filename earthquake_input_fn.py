@@ -18,7 +18,7 @@ def _deserialize_earthquakes2(serialized_examples):
     features['tminus'] = tf.strings.to_number(string_tensor=features['tminus'], out_type=tf.float64)
     features['acousticdata'] = tf.cast(features['acousticdata'], tf.float32)
     
-    return tf.data.Dataset.from_tensor_slices(({'acousticdata': features['acousticdata'] / 5515.0}, features['tminus'] / 16.10))
+    return  tf.data.Dataset.from_tensor_slices(({'acousticdata': features['acousticdata'] / 5515.0}, features['tminus'] / 16.10))
 
 def earthquake_input_fn2(basedir, batch_size, timesteps, scales=None, traintest='none', eager=False, seed=1234):
     """
@@ -47,13 +47,17 @@ def earthquake_input_fn2(basedir, batch_size, timesteps, scales=None, traintest=
     
     if traintest == 'train':
         dataset = dataset.shuffle(10000)
-    dataset = tf.data.TFRecordDataset(dataset, num_parallel_reads=24)
+    dataset = dataset.apply(tf.data.experimental.parallel_interleave(lambda x: tf.data.TFRecordDataset(x).interleave(_deserialize_earthquakes2,
+                                                                                                                     cycle_length=1,
+                                                                                                                     block_length=timesteps),
+                                                                     cycle_length=32, block_length=timesteps,
+                                                                     sloppy=traintest == 'train'))
     
     # Turn each input example into a series of 4096/(timesteps) sub-examples
-    N_sub_batches = int(4096 / timesteps)    
-    dataset = dataset.apply(tf.data.experimental.parallel_interleave(lambda x: _deserialize_earthquakes2(x),
-                                                                     cycle_length=batch_size,
-                                                                     block_length=timesteps))
+    #N_sub_batches = int(4096 / timesteps)    
+    #dataset = dataset.apply(tf.data.experimental.parallel_interleave(lambda x: _deserialize_earthquakes2(x),
+    #                                                                 cycle_length=batch_size,
+    #                                                                 block_length=timesteps))
     
     dataset = dataset.batch(timesteps).batch(batch_size)
     dataset = dataset.prefetch(2)
