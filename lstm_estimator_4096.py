@@ -29,7 +29,7 @@ def lstm_4096_model_fn(features, labels, mode, params):
     feature_columns = params['feature_columns']
     lstm_cell_size = params['lstm_cell_size']
     learning_rate = params['learning_rate']
-    dropout_rate = params['dropout_rate']
+    dropout_rate = params['dropout_rate'] if mode == tf.estimator.ModeKeys.TRAIN else 0
     lambda_l2_reg = params['lambda_l2_reg']
     grad_clip = params['grad_clip']
     dense_size = params['dense_size']
@@ -56,7 +56,7 @@ def lstm_4096_model_fn(features, labels, mode, params):
     # Create input layer from features and feature columns
     with tf.variable_scope('input'):
         with tf.device('/gpu:0'):
-            input_layer = tf.reshape(tf.feature_column.input_layer(features, feature_columns), (batch_size, timesteps)) #(batch_size, timesteps)
+            input_layer = tf.reshape(tf.feature_column.input_layer(features, feature_columns), (-1, timesteps)) #(batch_size, timesteps)
             
     
     # This code does CNN stuff on the input
@@ -125,11 +125,14 @@ def lstm_4096_model_fn(features, labels, mode, params):
         tf.summary.histogram('stride_lstm_states', stride_states)
     
     print('stride_outputs', stride_outputs)
-    final_stride_output = tf.transpose(stride_outputs, [1, 0, 2])[:,-1,:]
-    tf.summary.histogram('final_stride_output', final_stride_output)
+    final_stride_outputs = tf.transpose(stride_outputs, [1, 0, 2])
+    tf.summary.histogram('final_stride_outputs', final_stride_outputs)
     # Regularization network for stride network
     with tf.variable_scope('stride_rnn_regularization'):
-        stride_rnn_dense = tf.layers.Dense(units=256, activation=tf.nn.leaky_relu, name='stride_rnn_dense', dtype=tf.float64)(final_stride_output)
+        stride_rnn_dense = tf.layers.Dense(units=256, 
+                                           activation=tf.nn.leaky_relu,
+                                           name='stride_rnn_dense',
+                                           dtype=tf.float64)(final_stride_outputs[:,-1,:])
         stride_reg_out = tf.layers.Dense(units=1, activation=None, dtype=tf.float64)(stride_rnn_dense)
         stride_reg_loss = tf.reduce_sum(tf.abs(labels[:,-1] - stride_reg_out))
         stride_mae_op = tf.metrics.mean_absolute_error(labels=labels[:,-1],
@@ -140,7 +143,7 @@ def lstm_4096_model_fn(features, labels, mode, params):
     
     # more features: STFT
     with tf.variable_scope('stft_rnn_input'):
-        stft_rnn_input = tf.reshape(input_layer, [batch_size, timesteps])
+        stft_rnn_input = tf.reshape(input_layer, [-1, timesteps])
         # (batch_size, frame_step, 4096 // frame_length + 1)
         stft_rnn_input = tf.contrib.signal.stft(stft_rnn_input, frame_length=stft_frame_length,
                                                 frame_step=stft_frame_step, pad_end='None', name='stft_op')
@@ -149,7 +152,7 @@ def lstm_4096_model_fn(features, labels, mode, params):
         stft_rnn_input = tf.log(stft_rnn_input + log_offset) # take log power, as is tradition
         stft_rnn_input = tf.transpose(stft_rnn_input, [1, 0, 2])
         stft_rnn_input = tf.cast(stft_rnn_input, tf.float64)
-        stft_rnn_input = tf.layers.batch_normalization(stft_rnn_input, training=mode == tf.estimator.ModeKeys.TRAIN)
+        #stft_rnn_input = tf.layers.batch_normalization(stft_rnn_input, training=mode == tf.estimator.ModeKeys.TRAIN)
         tf.summary.histogram('stft_rnn_input', stft_rnn_input)
         print('stft_rnn_input', stft_rnn_input)
         
@@ -166,11 +169,14 @@ def lstm_4096_model_fn(features, labels, mode, params):
     
     print('stft_outputs', stft_outputs)
     #rnn_timesteps = int(4096 / stft_frame_step)
-    final_stft_output = tf.transpose(stft_outputs, [1, 0, 2])[:,-1,:]
-    tf.summary.histogram('final_stft_output', final_stft_output)
+    final_stft_outputs = tf.transpose(stft_outputs, [1, 0, 2])
+    tf.summary.histogram('final_stft_outputs', final_stft_outputs)
     # Regularization network for stft network
     with tf.variable_scope('stft_rnn_regularization'):
-        stft_rnn_dense = tf.layers.Dense(units=256, activation=tf.nn.leaky_relu, name='stft_rnn_dense', dtype=tf.float64)(final_stft_output)
+        stft_rnn_dense = tf.layers.Dense(units=256,
+                                         activation=tf.nn.leaky_relu,
+                                         name='stft_rnn_dense',
+                                         dtype=tf.float64)(final_stft_outputs[:,-1,:])
         stft_reg_out = tf.layers.Dense(units=1, activation=None, dtype=tf.float64)(stft_rnn_dense)
         stft_reg_loss = tf.reduce_sum(tf.abs(labels[:,-1] - stft_reg_out))
         stft_mae_op = tf.metrics.mean_absolute_error(labels=labels[:,-1],
@@ -179,7 +185,17 @@ def lstm_4096_model_fn(features, labels, mode, params):
         tf.summary.scalar('stft_mae', stft_mae_op[1])
     
     
-    dense = tf.concat([final_stft_output, final_stride_output], axis=1)
+    # calculate expected shape
+    stft_steps = int(timesteps / stft_frame_step)
+    stft_units = 2 * lstm_cell_size[-1] * stft_steps
+    print('total stft elems per batch:', stft_units)
+    stride_steps = num_splits
+    stride_units = 2 * lstm_cell_size[-1] * stride_steps
+    print('total stride elems per batch:', stride_units)
+    total_units = stft_units * stride_units
+    stack_stft = tf.reshape(final_stft_outputs, (-1, stft_units))
+    stack_stride = tf.reshape(final_stride_outputs, (-1, stride_units))
+    dense = tf.concat([stack_stft, stack_stride], axis=1)
     #dense = tf.cast(final_rnn_output, tf.float64)
     print('dense input', dense)
     
@@ -188,6 +204,8 @@ def lstm_4096_model_fn(features, labels, mode, params):
     dense_layers = []
     with tf.variable_scope('dense_head'):
         for i, dense_sz in enumerate(dense_size):
+            if i == 0:
+                dense = tf.layers.batch_normalization(dense, training=mode == tf.estimator.ModeKeys.TRAIN)
             dense = tf.layers.Dense(units=dense_sz,
                                     activation=tf.nn.leaky_relu,
                                     name='dense_layer_%d' % i,

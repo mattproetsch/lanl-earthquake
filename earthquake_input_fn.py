@@ -5,10 +5,11 @@ import os
 import numpy as np
 from time import time
 
-def _deserialize_earthquakes2(serialized_examples):
+def _deserialize_earthquakes2(serialized_examples, timesteps, training):
+    N_PER_FILE = 1500000
     features = {
-        'acousticdata': tf.FixedLenFeature((4096), tf.int64),
-        'tminus': tf.FixedLenFeature((4096), tf.string)
+        'acousticdata': tf.FixedLenFeature((N_PER_FILE), dtype=tf.int64),
+        'tminus': tf.FixedLenFeature((N_PER_FILE), dtype=tf.string)
     }
     features = tf.io.parse_single_example(
         serialized_examples,
@@ -18,23 +19,24 @@ def _deserialize_earthquakes2(serialized_examples):
     features['tminus'] = tf.strings.to_number(string_tensor=features['tminus'], out_type=tf.float64)
     features['acousticdata'] = tf.cast(features['acousticdata'], tf.float32)
     
-    return  tf.data.Dataset.from_tensor_slices(({'acousticdata': features['acousticdata'] / 5515.0}, features['tminus'] / 16.10))
+    dataset = tf.data.Dataset.from_tensor_slices(({'acousticdata': features['acousticdata'] / 5515.0}, features['tminus'] / 16.10))
+    if training:
+        if np.random.random() > 0.75:  # with 75% chance, skip some number of rows at the beginning of the file
+            dataset = dataset.skip(np.random.randint(timesteps))
+    
+    dataset = dataset.batch(timesteps, drop_remainder=True)
+    
+    if training:
+        dataset = dataset.shuffle(int(N_PER_FILE / timesteps))
+    
+    return dataset
 
-def earthquake_input_fn2(basedir, batch_size, timesteps, scales=None, traintest='none', eager=False, seed=1234):
-    """
-    `scales` argument should be a list of '1eX', where X can range from -8 to 2
-    """
+def earthquake_input_fn2(basedir, batch_size, timesteps, window_shift=None, traintest='none', eager=False, seed=1234):
     
     assert traintest in ['train', 'test'], 'must specify traintest as "train" or "test"'
-    assert 4096 % timesteps == 0, 'timesteps must evenly divide 4096'
-    possible_scales = ['1e%d' % d for d in range(-9, 4+1)]
+    assert 150000 % timesteps == 0, 'timesteps should divide 150k otherwise your test data is messed up'
     
-    files = []
-    if type(scales) is str:
-        scales = [scales]
-    for x in scales:
-        assert x in possible_scales, 'invalid scale %s, try ["1e0", "1e-2"], "1e1", etc.' % x
-        files.extend(glob(osp.join(basedir, traintest, x, '*.tfrecords')))
+    files = glob(osp.join(basedir, traintest, '*.tfrecord'))
     
     if traintest == 'train':
         np.random.seed(np.int64(time()))
@@ -44,23 +46,13 @@ def earthquake_input_fn2(basedir, batch_size, timesteps, scales=None, traintest=
     files = np.random.permutation(files)
         
     dataset = tf.data.Dataset.from_tensor_slices(files)
-    
-    if traintest == 'train':
-        dataset = dataset.shuffle(10000)
-    dataset = dataset.apply(tf.data.experimental.parallel_interleave(lambda x: tf.data.TFRecordDataset(x).interleave(_deserialize_earthquakes2,
-                                                                                                                     cycle_length=1,
-                                                                                                                     block_length=timesteps),
-                                                                     cycle_length=32, block_length=timesteps,
-                                                                     sloppy=traintest == 'train'))
-    
-    # Turn each input example into a series of 4096/(timesteps) sub-examples
-    #N_sub_batches = int(4096 / timesteps)    
-    #dataset = dataset.apply(tf.data.experimental.parallel_interleave(lambda x: _deserialize_earthquakes2(x),
-    #                                                                 cycle_length=batch_size,
-    #                                                                 block_length=timesteps))
-    
-    dataset = dataset.batch(timesteps).batch(batch_size)
-    dataset = dataset.prefetch(2)
+    dataset = tf.data.TFRecordDataset(dataset, num_parallel_reads=8)
+    dataset = dataset.apply(tf.data.experimental.parallel_interleave(\
+                            lambda x: _deserialize_earthquakes2(x, timesteps, traintest == 'train'),
+                            cycle_length=8,
+                            block_length=4))
+    dataset = dataset.batch(batch_size)
+    dataset = dataset.prefetch(100)
     
     if eager:
         return dataset
