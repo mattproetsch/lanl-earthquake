@@ -2,7 +2,7 @@ import tensorflow as tf
 from hooks import ModelStepTrackerHook
 
 def build_dropout_lstm_cell(num_units, activation, reuse,
-                            dtype, timesteps, dropout_rate,
+                            dtype, dropout_rate,
                             name, mode):
     cell = tf.nn.rnn_cell.LSTMCell(num_units=num_units,
                                    activation=activation,
@@ -20,7 +20,73 @@ def build_dropout_lstm_cell(num_units, activation, reuse,
                                              input_size=1,
                                              dtype=dtype)
     return cell
+
+def extract_stats(tens, axnum):
+    """ returns (min, max, mean, var) along axis axnum """
+    tens_min = tf.reduce_min(tens, axis=axnum)
+    tens_max = tf.reduce_max(tens, axis=axnum)
+    tens_mean, tens_var = tf.nn.moments(tens, axes=[axnum])
+    return tens_min, tens_max, tens_mean, tens_var
+
+def to_stft(tens, timesteps, window_size, window_step):
+    stft_input = tf.reshape(tens, [-1, timesteps])
+    stft_input = tf.contrib.signal.stft(stft_input, frame_length=window_size,
+                                        frame_step=window_step, pad_end='None', name='stft_op')
+    stft_input = tf.real(stft_input * tf.conj(stft_input))
+    log_offset = 1e-6
+    stft_input = tf.log(stft_input + log_offset)  # take log power, as is tradition
+    stft_input = tf.cast(stft_input, tf.float64)
+    tf.summary.histogram('stft_input', stft_input)
+    print('stft_input', stft_input)
+    return stft_input
+ 
         
+def to_timepool(tens, timesteps, time_pool):
+    # take pooled features every time_pool steps 
+    # for 4096 input w/ time_pool=8, we take abs max of every 8 timesteps for a resulting dimension of (batch_size, 4096/8=512)
+    stride_input = tf.reshape(tens, [-1, timesteps])
+    num_splits = int(timesteps/time_pool)
+    stride_input = tf.cast(tens, tf.float64)
+    print('num_splits=%d (this is the number of timesteps fed to stride CNN)' % num_splits)
+    stride_input = tf.split(stride_input, num_or_size_splits=num_splits, axis=1)        #([batch_size, time_pool] * num_splits)
+    stride_input = tf.stack(stride_input, axis=1)                                       #(batch_size, num_splits, time_pool))
+    
+    stride_min, stride_max, stride_mean, stride_var = extract_stats(stride_input, axnum=2)
+    
+    stride_roc = stride_input[:,:,1:] - stride_input[:,:,:-1]
+    stride_minroc, stride_maxroc, stride_meanroc, stride_varroc = extract_stats(stride_roc, axnum=2)
+    
+    stride_roroc = stride_roc[:,:,1:] - stride_roc[:,:,:-1]
+    stride_minroroc, stride_maxroroc, stride_meanroroc, stride_varroroc = extract_stats(stride_roroc, axnum=2)
+    
+    stride5 = stride_input[:,:,::5]
+    stride5_roc = stride5[:,:,1:] - stride5[:,:,:-1]
+    stride5_roc_min, stride5_roc_max, stride5_roc_mean, stride5_roc_var = extract_stats(stride5, axnum=2)
+    
+    stride30 = stride_input[:,:,::30]
+    stride30_roc = stride30[:,:,1:] - stride30[:,:,:-1]
+    stride30_roc_min, stride30_roc_max, stride30_roc_mean, stride30_roc_var = extract_stats(stride30, axnum=2)
+    
+    print('stride_min', stride_min)
+    print('stride_max', stride_max)
+    print('stride_mean', stride_mean)
+    print('stride_var', stride_var)
+    print('stride_minroc', stride_minroc)
+    print('stride_maxroc', stride_maxroc)
+    print('stride_meanroc', stride_meanroc)
+    print('stride_varroc', stride_varroc)
+    print('stride_minroroc', stride_minroroc)
+    print('stride_maxroroc', stride_maxroroc)
+    print('stride_meanroroc', stride_meanroroc)
+    print('stride_varroroc', stride_varroroc)
+    
+    stride_input = tf.stack([stride_min, stride_max, stride_mean, stride_var,
+                             stride_minroc, stride_maxroc, stride_meanroc, stride_varroc,
+                             stride_minroroc, stride_maxroroc, stride_meanroroc, stride_varroroc,
+                             stride5_roc_min, stride5_roc_max, stride5_roc_mean, stride5_roc_var,
+                             stride30_roc_min, stride30_roc_max, stride30_roc_mean, stride30_roc_var], axis=2)
+    return stride_input
+    
 def lstm_4096_model_fn(features, labels, mode, params):
     
     batch_size = params['batch_size']
@@ -34,11 +100,13 @@ def lstm_4096_model_fn(features, labels, mode, params):
     grad_clip = params['grad_clip']
     dense_size = params['dense_size']
     time_pool = params['time_pool']
-    cnn_size = params['cnn_size']
+    cnn_spec = params['cnn_spec']
     stft_frame_length = params['stft_frame_length']
     stft_frame_step = params['stft_frame_step']
     use_stft = params['use_stft']
     use_stride = params['use_stride']
+    use_stride_cnn = params['use_stride_cnn']
+    use_stft_cnn = params['use_stft_cnn']
     regularize_networks = params['regularize_networks']
     dense_batch_norm = params['use_dense_batch_norm']
     optimizer_name = params['optimizer_name']
@@ -48,6 +116,8 @@ def lstm_4096_model_fn(features, labels, mode, params):
     eval_metrics = {}
     loss = tf.constant(0.0, dtype=tf.float64)
     _labels = labels[:,-1]
+    
+    use_attention = False  #TODO #FINDME #FIXME
     
     
     if not all(map(lambda x: x == lstm_cell_size[-1], lstm_cell_size)):
@@ -71,40 +141,102 @@ def lstm_4096_model_fn(features, labels, mode, params):
     
     # This code does CNN stuff on the input
     # It didn't work so well
-    # with tf.variable_scope('cnn_input'):
-    #     # just reshape for CNN
-    #     cnn_input = tf.cast(tf.reshape(input_layer, (batch_size, timesteps, 1)), tf.float64)  #(batch_size, timesteps, 1)
-    #     print('cnn_input', cnn_input)
-    # 
-    # # Create CNN layers
-    # with tf.variable_scope('cnn_structures'):
-    #     cnn = cnn_input
-    #     for i, (cnn_filter, cnn_kernel) in enumerate(cnn_size):
-    #         cnn = tf.layers.Conv1D(filters=cnn_filter, kernel_size=cnn_kernel,
-    #                                padding='same', activation=tf.nn.leaky_relu, dtype=tf.float64)(cnn)
-    #         if i <= 3:
-    #             cnn = tf.layers.batch_normalization(cnn, training=mode == tf.estimator.ModeKeys.TRAIN)
-    #         if i >= 3:
-    #             cnn = tf.layers.MaxPooling1D(2, 2)(cnn)
-    #         if mode == tf.estimator.ModeKeys.TRAIN:
-    #             cnn = tf.layers.Dropout(rate=dropout_rate)(cnn)
-    #         
-    #         
-    # print('cnn (output)', cnn)
-    # cnn_output_time = int(int(timesteps) / int(2**(len(cnn_size) - 3)))
-    # final_cnn_output = tf.reshape(cnn, (batch_size, int(int(cnn_size[-1][0])) * cnn_output_time))
-    # print('reshaped cnn output', final_cnn_output)
-    # 
-    # # Regularization
-    # with tf.variable_scope('cnn_loss'):
-    #     cnn_dense = tf.layers.Dense(units=256, activation=tf.nn.leaky_relu, name='cnn_pre_dense', dtype=tf.float64)(final_cnn_output)
-    #     cnn_dense_out = tf.layers.Dense(units=1, activation=None, name='cnn_dense_loss_layer', dtype=tf.float64)(cnn_dense)
-    #     cnn_unfair_loss = tf.reduce_sum(tf.abs(labels[:,-1] - cnn_dense_out))
-    #     cul_op = tf.metrics.mean_absolute_error(labels=labels[:,-1],
-    #                                             predictions=cnn_dense_out,
-    #                                             name='cul_op')
-    #     tf.summary.scalar('unfair_loss_cnn', cul_op[1])
+    # (but we're trying again!)
+    if use_stride_cnn:
+        with tf.variable_scope('stride_cnn_input'):
+            num_splits = int(timesteps/time_pool)
+            stride_cnn_input = tf.reshape(tf.cast(input_layer, tf.float64), (-1, timesteps, 1))
+            print('stride_cnn_input', stride_cnn_input)
+        
+        # Create CNN layers
+        with tf.variable_scope('stride_cnn_structures'):
+            with tf.device('/gpu:0'):
+                stride_cnn = stride_cnn_input
+                for i, cnn_layer_spec in enumerate(cnn_spec):
+                    s = cnn_layer_spec
+                    stride_cnn_input = stride_cnn
+                    stride_cnn = tf.layers.Conv1D(filters=s['filters'], kernel_size=s['kernel_size'],
+                                                  padding='same', activation=tf.nn.leaky_relu, dtype=tf.float64)(stride_cnn)
+                    if s['batch_norm']:
+                        stride_cnn = tf.layers.batch_normalization(stride_cnn, training=mode == tf.estimator.ModeKeys.TRAIN)
+                    if s['skip']:
+                        stride_cnn = stride_cnn + stride_cnn_input    
+                    if s['max_pool']:
+                        stride_cnn = tf.layers.MaxPooling1D(2, 2)(stride_cnn)
+                    if mode == tf.estimator.ModeKeys.TRAIN and s['dropout']:
+                        stride_cnn = tf.layers.Dropout(rate=dropout_rate)(stride_cnn)
+                    print('stride cnn layer %d: %s' % (i, stride_cnn))
+                
+                
+        print('stride cnn (output)', stride_cnn)
+        stride_steps = num_splits
+        for cnn_layer_spec in cnn_spec:
+            stride_steps = stride_steps if cnn_layer_spec['max_pool'] == 0 else int(stride_steps / 2)
+        final_stride_cnn_output = tf.reshape(stride_cnn, (-1, int(stride_steps * cnn_spec[-1]['filters'])))
+        print('reshaped stride cnn output', final_stride_cnn_output)
+        
+        # Regularization
+        if regularize_networks:
+            with tf.variable_scope('stride_cnn_loss'):
+                stride_cnn_dense_out = tf.layers.Dense(units=1, activation=None, dtype=tf.float64)(final_stride_cnn_output)
+                print('stride_cnn_dense_out')
+                stride_cnn_reg_loss = tf.reduce_sum(tf.abs(_labels - stride_cnn_dense_out))
+                loss += stride_cnn_reg_loss
+                stride_cnn_reg_op = tf.metrics.mean_absolute_error(labels=_labels,
+                                                                   predictions=stride_cnn_dense_out,
+                                                                   name='cnn_mae_op')
+                tf.summary.scalar('stride_cnn_mae', stride_cnn_reg_op[1])
+                eval_metrics.update({'stride_cnn_regularization/stride_cnn_mae': stride_cnn_reg_op})
     
+    if use_stft_cnn:
+        with tf.variable_scope('stft_cnn_input'):
+            stft_cnn_input = tf.reshape(input_layer, [-1, timesteps])
+            stft_cnn_input = tf.contrib.signal.stft(stft_cnn_input, frame_length=stft_frame_length,
+                                                    frame_step=stft_frame_step, pad_end='None', name='stft_cnn_op')
+            stft_cnn_input = tf.real(stft_cnn_input * tf.conj(stft_cnn_input))
+            log_offset = 1e-6
+            stft_cnn_input = tf.log(stft_cnn_input + log_offset)  # take log power, as is tradition
+            stft_cnn_input = tf.cast(stft_cnn_input, tf.float64)
+            tf.summary.histogram('stft_cnn_input', stft_cnn_input)
+            print('stft_cnn_input', stft_cnn_input)
+        
+        # Create CNN layers
+        with tf.variable_scope('stft_cnn_structures'):
+            with tf.device('/gpu:0'):
+                stft_cnn = stft_cnn_input
+                for i, cnn_layer_spec in enumerate(cnn_spec):  # reuse CNN
+                    s = cnn_layer_spec
+                    stft_cnn = tf.layers.Conv1D(filters=s['filters'], kernel_size=s['kernel_size'],
+                                                padding='same', activation=tf.nn.leaky_relu, dtype=tf.float64)(stft_cnn)
+                    if s['batch_norm']:
+                        stft_cnn = tf.layers.batch_normalization(stft_cnn,
+                                                                 training=mode == tf.estimator.ModeKeys.TRAIN)
+                    if s['max_pool']:
+                        stft_cnn = tf.layers.MaxPooling1D(2, 2)(stft_cnn)
+                    if mode == tf.estimator.ModeKeys.TRAIN and s['dropout']:
+                        stft_cnn = tf.layers.Dropout(rate=dropout_rate)(stft_cnn)
+                    print('cnn layer %d: %s' % (i, stft_cnn))
+                
+                
+        print('stft cnn (output)', stft_cnn)
+        stft_steps = int(timesteps / stft_frame_step)
+        for cnn_layer_spec in cnn_spec:
+            stft_steps = stft_steps if cnn_layer_spec['max_pool'] == 0 else int(stft_steps / 2)
+        final_stft_cnn_output = tf.reshape(stft_cnn, (-1, int(stft_steps * cnn_spec[-1]['filters'])))
+        print('reshaped stft cnn output', final_stft_cnn_output)
+        
+        # Regularization
+        if regularize_networks:
+            with tf.variable_scope('stft_cnn_loss'):
+                stft_cnn_dense_out = tf.layers.Dense(units=1, activation=None, dtype=tf.float64)(final_stft_cnn_output)
+                print('stft_cnn_dense_out')
+                stft_cnn_reg_loss = tf.reduce_sum(tf.abs(_labels - stft_cnn_dense_out))
+                loss += stft_cnn_reg_loss
+                stft_cnn_reg_op = tf.metrics.mean_absolute_error(labels=_labels,
+                                                                 predictions=stft_cnn_dense_out,
+                                                                 name='stft_cnn_mae_op')
+                tf.summary.scalar('stft_cnn_mae', stft_cnn_reg_op[1])
+                eval_metrics.update({'stft_cnn_regularization/stft_cnn_mae': stft_cnn_reg_op})
     
     
     # This code takes maxval of every time_pool steps to compress the input sequence. it didn't work very well.
@@ -148,8 +280,8 @@ def lstm_4096_model_fn(features, labels, mode, params):
         print('stride_outputs', stride_outputs)
         final_stride_outputs = tf.transpose(stride_outputs, [1, 0, 2])
         tf.summary.histogram('final_stride_outputs', final_stride_outputs)
+        
         # Regularization network for stride network
-
         if regularize_networks:
             with tf.variable_scope('stride_rnn_regularization'):
                 stride_reg_out = tf.layers.Dense(units=1, activation=None, dtype=tf.float64)(final_stride_outputs[:,-1,:])
@@ -162,6 +294,45 @@ def lstm_4096_model_fn(features, labels, mode, params):
                                                                name='stride_mae_op')
                 tf.summary.scalar('stride_mae', stride_mae_op[1])
                 eval_metrics.update({'stride_rnn_regularization/stride_mae': stride_mae_op})
+        if use_attention:
+            with tf.variable_scope('stride_rnn_attention_decoder'):
+                # build score network
+                N_inp = lstm_cell_size[-1]
+                stride_decoder_w = tf.get_variable('stride_attn_w', shape=(N_inp * 2, attn_size), dtype=tf.float64,
+                                                   initializer=tf.initializers.random_normal(mean=0.0, stddev=0.1, dtype=tf.float64))
+                stride_decoder_b = tf.get_variable('stride_attn_b', shape=(N_inp * 2,), dtype=tf.float64,
+                                                   initializer=tf.initializers.zeros(dtype=tf.float64))
+                stride_decoder_v = tf.get_variable('stride_attn_v', shape=(attn_size, 1), dtype=tf.float64,
+                                                   initializer=tf.initializers.random_normal(mean=0.0, stddev=0.01, dtype=tf.float64))
+                def get_context(enc_rnn_states, dec_rnn_state):
+                    scores = []
+                    for i in range(num_splits):
+                        attn_score_inp = tf.concat([enc_rnn_states[:,i,:], dec_rnn_state], axis=1)
+                        score = tf.matmul(tf.math.tanh(tf.matmul(attn_score_inp + stride_decoder_b, stride_decoder_w)), stride_decoder_v)
+                        scores.append(score)
+                    scores_tensor = tf.stack(scores, axis=1)                       # [batch_size, num_splits, 1]
+                    #return tf.nn.softmax(scores_tensor, axis=1) * enc_rnn_states   # [batch_size, num_splits, lstm_cell_size[-1]]
+                    # Need to multiply weights by scores to get [batch_size, lstm_cell_size] as retval
+                
+                attn_cells = [build_dropout_lstm_cell(num_units=lstm_cell_size[i],
+                                                      activation=tf.nn.leaky_relu,
+                                                      reuse=False,
+                                                      dtype=tf.float64,
+                                                      dropout_rate=dropout_rate,
+                                                      name='lstm_cell_%d' % i,
+                                                      mode=mode) for i in range(len(lstm_cell_size))]
+                attn_net = tf.nn.rnn_cell.MultiRNNCell(attn_cells)
+                attn_states = attn_net.zero_state(batch_size)
+                attn_input = final_stride_ouputs[:,-1,:]
+                # build static attention network (no dynamic unrolling)
+                for i in range(attn_steps):
+                    # run score network
+                    for cell_num in range(len(lstm_cell_size)):
+                        attn_states[cell_num][0][1] = get_context(stride_states, attn_states[cell_num][0][1])
+                    attn_outputs, attn_states = attn_net(attn_input, attn_states)
+                    attn_input = attn_outputs
+                
+                final_stride_outputs = attn_outputs
     
     
     # more features: STFT
@@ -172,7 +343,7 @@ def lstm_4096_model_fn(features, labels, mode, params):
                                                     frame_step=stft_frame_step, pad_end='None', name='stft_op')
             stft_rnn_input = tf.real(stft_rnn_input * tf.conj(stft_rnn_input))
             log_offset = 1e-6
-            stft_rnn_input = tf.log(stft_rnn_input + log_offset) # take log power, as is tradition
+            stft_rnn_input = tf.log(stft_rnn_input + log_offset)  # take log power, as is tradition
             stft_rnn_input = tf.transpose(stft_rnn_input, [1, 0, 2])
             stft_rnn_input = tf.cast(stft_rnn_input, tf.float64)
             tf.summary.histogram('stft_rnn_input', stft_rnn_input)
@@ -219,15 +390,22 @@ def lstm_4096_model_fn(features, labels, mode, params):
         stride_units = directionality_factor * lstm_cell_size[-1] * stride_steps
         print('total stride elems per batch:', stride_units)
         stack_stride = tf.reshape(final_stride_outputs, (-1, stride_units))
-        
-    if use_stft and use_stride:
-        dense = tf.concat([stack_stft, stack_stride], axis=1)
-    elif use_stft:
-        dense = stack_stft
-    elif use_stride:
-        dense = stack_stride
-    else:
-        dense = tf.cast(input_layer, tf.float64)
+    
+    concats = []
+    if use_stride_cnn:
+        concats.append(final_stride_cnn_output)
+    if use_stft_cnn:
+        concats.append(final_stft_cnn_output)
+    if use_stft:
+        concats.append(stack_stft)
+    if use_stride:
+        concats.append(stack_stride)
+    
+    if not use_stride_cnn and not use_stft and not use_stride and not use_stft_cnn:
+        print('WARNING: No features except input layers are selected!')
+        concats.append(input_layer)  # model with no intermediate steps
+    
+    dense = tf.concat(concats, axis=1)
     print('dense input', dense)
     
     # Pass through a Dense layer(s)
@@ -305,14 +483,18 @@ def lstm_4096_model_fn(features, labels, mode, params):
             optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
         elif optimizer_name == 'SGD':
             optimizer = tf.train.GradientDescentOptimizer(learning_rate=learning_rate)
+        elif optimizer_name == 'RMSProp':
+            optimizer = tf.train.RMSPropOptimizer(learning_rate=learning_rate)
         else:
             raise Exception('Unsupported optimizer: ' + str(optimizer))
+        #return tf.estimator.EstimatorSpec(mode, loss=loss, train_op=optimizer.minimize(loss, global_step=tf.train.get_global_step()))
         
         if dense_batch_norm:
             update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
             with tf.control_dependencies(update_ops):
                 gradient_var_pairs = optimizer.compute_gradients(loss)
-                gvps = gradient_var_pairs #list(filter(lambda gvp: gvp[0] is not None, gradient_var_pairs))
+                #gvps = gradient_var_pairs 
+                gvps = list(filter(lambda gvp: gvp[0] is not None, gradient_var_pairs))
                 vars = [x[1] for x in gvps]
                 grad_dtypes = [x[0].dtype for x in gvps]
                 gradients = [tf.cast(x[0], tf.float64) for x in gvps]
@@ -328,7 +510,8 @@ def lstm_4096_model_fn(features, labels, mode, params):
                 #train_op = optimizer.minimize(loss, global_step=tf.train.get_global_step())
         else:
             gradient_var_pairs = optimizer.compute_gradients(loss)
-            gvps = gradient_var_pairs #list(filter(lambda gvp: gvp[0] is not None, gradient_var_pairs))
+            #gvps = gradient_var_pairs 
+            gvps = list(filter(lambda gvp: gvp[0] is not None, gradient_var_pairs))
             vars = [x[1] for x in gvps]
             grad_dtypes = [x[0].dtype for x in gvps]
             gradients = [tf.cast(x[0], tf.float64) for x in gvps]
