@@ -11,7 +11,7 @@ import os, numpy as np
 from time import time
 
 def _deserialize_earthquakes2(serialized_examples, timesteps, training, noise):
-    N_PER_FILE = timesteps
+    N_PER_FILE = 150000
     BUFFER = N_PER_FILE
     LEN = N_PER_FILE + BUFFER
     features = {'acousticdata': tf.FixedLenFeature(LEN, dtype=tf.int64), 

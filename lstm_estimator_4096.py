@@ -145,26 +145,65 @@ def lstm_4096_model_fn(features, labels, mode, params):
     if use_stride_cnn:
         with tf.variable_scope('stride_cnn_input'):
             num_splits = int(timesteps/time_pool)
-            stride_cnn_input = tf.reshape(tf.cast(input_layer, tf.float64), (-1, timesteps, 1))
+            if time_pool == 1:
+                stride_cnn_input = tf.reshape(tf.cast(input_layer, tf.float64), (-1, timesteps, 1))
+            else:
+                stride_cnn_input = to_timepool(input_layer, timesteps, time_pool)
             print('stride_cnn_input', stride_cnn_input)
         
         # Create CNN layers
         with tf.variable_scope('stride_cnn_structures'):
             with tf.device('/gpu:0'):
                 stride_cnn = stride_cnn_input
+                stride_cnn_activations = [stride_cnn]
+                qrnn_c = tf.zeros(shape=(tf.shape(stride_cnn_input)[0], num_splits, cnn_spec[0]['filters']), dtype=tf.float64)
                 for i, cnn_layer_spec in enumerate(cnn_spec):
                     s = cnn_layer_spec
                     stride_cnn_input = stride_cnn
-                    stride_cnn = tf.layers.Conv1D(filters=s['filters'], kernel_size=s['kernel_size'],
-                                                  padding='same', activation=tf.nn.leaky_relu, dtype=tf.float64)(stride_cnn)
+                    if s['skip'] is not None:
+                        activation = None
+                    else:
+                        activation = tf.nn.leaky_relu
+                        
+                    # compute activations
+                    stride_cnn_activation = tf.layers.Conv1D(filters=s['filters'], kernel_size=s['kernel_size'],
+                                                             padding='same', activation=activation, dtype=tf.float64,
+                                                             name='conv-%d' % i)(stride_cnn)
+                    stride_forget = tf.layers.Conv1D(filters=s['filters'], kernel_size=s['kernel_size'],
+                                                     padding='same', activation=tf.nn.sigmoid, dtype=tf.float64,
+                                                     name='forget-%d' % i)(stride_cnn)
+                    stride_output = tf.layers.Conv1D(filters=s['filters'], kernel_size=s['kernel_size'],
+                                                     padding='same', activation=tf.nn.sigmoid, dtype=tf.float64,
+                                                     name='output-%d' % i)(stride_cnn)
+                    stride_input = tf.layers.Conv1D(filters=s['filters'], kernel_size=s['kernel_size'],
+                                                    padding='same', activation=tf.nn.sigmoid, dtype=tf.float64,
+                                                    name='input-%d' % i)(stride_cnn)
+                    
                     if s['batch_norm']:
-                        stride_cnn = tf.layers.batch_normalization(stride_cnn, training=mode == tf.estimator.ModeKeys.TRAIN)
-                    if s['skip']:
-                        stride_cnn = stride_cnn + stride_cnn_input    
+                        stride_cnn_activation = tf.layers.batch_normalization(stride_cnn_activation,
+                                                                   training=mode == tf.estimator.ModeKeys.TRAIN)
+                        
+                    if mode == tf.estimator.ModeKeys.TRAIN and s['dropout']:
+                        # Apply zoneout-like dropout
+                        stride_forget = 1 - tf.layers.Dropout(rate=dropout_rate)(stride_forget)
+                    
+                    
+                    if s['skip'] is not None:
+                        qrnn_i = stride_input * tf.nn.leaky_relu(stride_cnn_activation) * \
+                                    (1 - stride_input) * stride_cnn_activations[-s['skip']]
+                    else:
+                        qrnn_i = tf.nn.leaky_relu(stride_cnn_activation)
+                    
+                    qrnn_c = stride_forget * qrnn_c + (1 - stride_forget) * qrnn_i
+                    stride_cnn = stride_output * qrnn_c
+                    
+                    #if s['skip'] is not None:
+                    #    stride_cnn = stride_cnn + stride_cnn_activations[-s['skip']]
+                    #    stride_cnn = tf.nn.leaky_relu(stride_cnn)
                     if s['max_pool']:
                         stride_cnn = tf.layers.MaxPooling1D(2, 2)(stride_cnn)
-                    if mode == tf.estimator.ModeKeys.TRAIN and s['dropout']:
-                        stride_cnn = tf.layers.Dropout(rate=dropout_rate)(stride_cnn)
+                        qrnn_c = tf.layers.MaxPooling1D(2, 2)(qrnn_c)
+                    stride_cnn_activations.append(stride_cnn)
                     print('stride cnn layer %d: %s' % (i, stride_cnn))
                 
                 
