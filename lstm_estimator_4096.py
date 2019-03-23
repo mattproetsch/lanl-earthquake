@@ -53,19 +53,21 @@ def to_timepool(tens, timesteps, time_pool):
     
     stride_min, stride_max, stride_mean, stride_var = extract_stats(stride_input, axnum=2)
     
+    bes0_min, bes0_max, bes0_mean, bes0_var = extract_stats(tf.math.bessel_i0e(stride_input), axnum=2)
+    
+    bes1_min, bes1_max, bes1_mean, bes0_var = extract_stats(tf.math.bessel_i1e(stride_input), axnum=2)
+    
     stride_roc = stride_input[:,:,1:] - stride_input[:,:,:-1]
     stride_minroc, stride_maxroc, stride_meanroc, stride_varroc = extract_stats(stride_roc, axnum=2)
     
     stride_roroc = stride_roc[:,:,1:] - stride_roc[:,:,:-1]
     stride_minroroc, stride_maxroroc, stride_meanroroc, stride_varroroc = extract_stats(stride_roroc, axnum=2)
     
-    stride5 = stride_input[:,:,::5]
-    stride5_roc = stride5[:,:,1:] - stride5[:,:,:-1]
-    stride5_roc_min, stride5_roc_max, stride5_roc_mean, stride5_roc_var = extract_stats(stride5, axnum=2)
+    stride_skew = stride_roroc[:,:,1:] - stride_roroc[:,:,:-1]
+    skew_min, skew_max, skew_mean, skew_var = extract_stats(stride_skew, axnum=2)
     
-    stride30 = stride_input[:,:,::30]
-    stride30_roc = stride30[:,:,1:] - stride30[:,:,:-1]
-    stride30_roc_min, stride30_roc_max, stride30_roc_mean, stride30_roc_var = extract_stats(stride30, axnum=2)
+    stride_kurt = stride_skew[:,:,1:] - stride_skew[:,:,:-1]
+    kurt_min, kurt_max, kurt_mean, kurt_var = extract_stats(stride_kurt, axnum=2)
     
     print('stride_min', stride_min)
     print('stride_max', stride_max)
@@ -81,10 +83,12 @@ def to_timepool(tens, timesteps, time_pool):
     print('stride_varroroc', stride_varroroc)
     
     stride_input = tf.stack([stride_min, stride_max, stride_mean, stride_var,
+                             bes0_min, bes0_max, bes0_mean, bes0_var,
+                             bes1_min, bes1_max, bes1_mean, bes1_var,
                              stride_minroc, stride_maxroc, stride_meanroc, stride_varroc,
                              stride_minroroc, stride_maxroroc, stride_meanroroc, stride_varroroc,
-                             stride5_roc_min, stride5_roc_max, stride5_roc_mean, stride5_roc_var,
-                             stride30_roc_min, stride30_roc_max, stride30_roc_mean, stride30_roc_var], axis=2)
+                             skew_min, skew_max, skew_mean, skew_var,
+                             kurt_min, kurt_max, kurt_mean, kurt_var], axis=2)
     return stride_input
     
 def lstm_4096_model_fn(features, labels, mode, params):
@@ -148,7 +152,10 @@ def lstm_4096_model_fn(features, labels, mode, params):
             if time_pool == 1:
                 stride_cnn_input = tf.reshape(tf.cast(input_layer, tf.float64), (-1, timesteps, 1))
             else:
-                stride_cnn_input = to_timepool(input_layer, timesteps, time_pool)
+                stride_cnn_input = tf.cast(to_timepool(input_layer, timesteps, time_pool), tf.float64)
+                # stft_cnn_input = tf.cast(to_stft(input_layer, timesteps, stft_frame_length, stft_frame_step), tf.float64)
+                # stride_cnn_input = tf.concat([stride_cnn_input, stft_cnn_input], axis=2)
+                
             print('stride_cnn_input', stride_cnn_input)
         
         # Create CNN layers
@@ -157,6 +164,18 @@ def lstm_4096_model_fn(features, labels, mode, params):
                 stride_cnn = stride_cnn_input
                 stride_cnn_activations = [stride_cnn]
                 qrnn_c = tf.zeros(shape=(tf.shape(stride_cnn_input)[0], num_splits, cnn_spec[0]['filters']), dtype=tf.float64)
+                forget_layer = tf.layers.Conv1D(filters=cnn_spec[0]['filters'], kernel_size=cnn_spec[0]['kernel_size'],
+                                                padding='same', activation=tf.nn.sigmoid, dtype=tf.float64,
+                                                kernel_initializer=tf.contrib.layers.xavier_initializer(uniform=True, dtype=tf.float64),
+                                                name='forget-0')
+                output_layer = tf.layers.Conv1D(filters=cnn_spec[0]['filters'], kernel_size=cnn_spec[0]['kernel_size'],
+                                                padding='same', activation=tf.nn.sigmoid, dtype=tf.float64,
+                                                kernel_initializer=tf.contrib.layers.xavier_initializer(uniform=True, dtype=tf.float64),
+                                                name='output-0')
+                if not all(map(lambda x: x['filters'] == cnn_spec[0]['filters'], cnn_spec)):
+                    raise Exception('all CNN filter sizes should be equal')
+                if not all(map(lambda x: x['kernel_size'] == cnn_spec[0]['kernel_size'], cnn_spec)):
+                    raise Exception('all CNN kernel sizes should be equal')
                 for i, cnn_layer_spec in enumerate(cnn_spec):
                     s = cnn_layer_spec
                     stride_cnn_input = stride_cnn
@@ -168,38 +187,44 @@ def lstm_4096_model_fn(features, labels, mode, params):
                     # compute activations
                     stride_cnn_activation = tf.layers.Conv1D(filters=s['filters'], kernel_size=s['kernel_size'],
                                                              padding='same', activation=activation, dtype=tf.float64,
+                                                             kernel_initializer=tf.contrib.layers.xavier_initializer(uniform=False, dtype=tf.float64),
                                                              name='conv-%d' % i)(stride_cnn)
-                    stride_forget = tf.layers.Conv1D(filters=s['filters'], kernel_size=s['kernel_size'],
-                                                     padding='same', activation=tf.nn.sigmoid, dtype=tf.float64,
-                                                     name='forget-%d' % i)(stride_cnn)
-                    stride_output = tf.layers.Conv1D(filters=s['filters'], kernel_size=s['kernel_size'],
-                                                     padding='same', activation=tf.nn.sigmoid, dtype=tf.float64,
-                                                     name='output-%d' % i)(stride_cnn)
-                    stride_input = tf.layers.Conv1D(filters=s['filters'], kernel_size=s['kernel_size'],
-                                                    padding='same', activation=tf.nn.sigmoid, dtype=tf.float64,
-                                                    name='input-%d' % i)(stride_cnn)
+                    if i > 0 and stride_cnn_activations[-1].shape[-1] != stride_cnn_activations[-2].shape[-1]:
+                        print('creating new output/forget gates')
+                        forget_layer = tf.layers.Conv1D(filters=cnn_spec[0]['filters'], kernel_size=cnn_spec[0]['kernel_size'],
+                                                        padding='same', activation=tf.nn.sigmoid, dtype=tf.float64,
+                                                        kernel_initializer=tf.contrib.layers.xavier_initializer(uniform=True, dtype=tf.float64),
+                                                        name='forget-0')
+                        output_layer = tf.layers.Conv1D(filters=cnn_spec[0]['filters'], kernel_size=cnn_spec[0]['kernel_size'],
+                                                        padding='same', activation=tf.nn.sigmoid, dtype=tf.float64,
+                                                        kernel_initializer=tf.contrib.layers.xavier_initializer(uniform=True, dtype=tf.float64),
+                                                        name='output-0')
+                        
+                    stride_forget = forget_layer(stride_cnn)
+                    stride_output = output_layer(stride_cnn)
+                    # stride_input = tf.layers.Conv1D(filters=s['filters'], kernel_size=s['kernel_size'],
+                    #                                 padding='same', activation=tf.nn.sigmoid, dtype=tf.float64,
+                    #                                 kernel_initializer=tf.contrib.layers.xavier_initializer(uniform=True, dtype=tf.float64),
+                    #                                 name='input-%d' % i)(stride_cnn)
                     
                     if s['batch_norm']:
                         stride_cnn_activation = tf.layers.batch_normalization(stride_cnn_activation,
                                                                    training=mode == tf.estimator.ModeKeys.TRAIN)
                         
                     if mode == tf.estimator.ModeKeys.TRAIN and s['dropout']:
-                        # Apply zoneout-like dropout
+                        # Apply zoneout-like dropout per Bradbury 2016
                         stride_forget = 1 - tf.layers.Dropout(rate=dropout_rate)(stride_forget)
                     
-                    
                     if s['skip'] is not None:
-                        qrnn_i = stride_input * tf.nn.leaky_relu(stride_cnn_activation) * \
-                                    (1 - stride_input) * stride_cnn_activations[-s['skip']]
+                        # gated skip connections (peephole?)
+                        # qrnn_i = stride_input * stride_cnn_activations[-s['skip']] + tf.nn.leaky_relu(stride_cnn_activation)
+                        qrnn_i = stride_cnn_activations[-s['skip']] + tf.nn.leaky_relu(stride_cnn_activation)
                     else:
                         qrnn_i = tf.nn.leaky_relu(stride_cnn_activation)
                     
                     qrnn_c = stride_forget * qrnn_c + (1 - stride_forget) * qrnn_i
                     stride_cnn = stride_output * qrnn_c
                     
-                    #if s['skip'] is not None:
-                    #    stride_cnn = stride_cnn + stride_cnn_activations[-s['skip']]
-                    #    stride_cnn = tf.nn.leaky_relu(stride_cnn)
                     if s['max_pool']:
                         stride_cnn = tf.layers.MaxPooling1D(2, 2)(stride_cnn)
                         qrnn_c = tf.layers.MaxPooling1D(2, 2)(qrnn_c)
@@ -285,23 +310,7 @@ def lstm_4096_model_fn(features, labels, mode, params):
             # for 4096 input w/ time_pool=8, we take abs max of every 8 timesteps for a resulting dimension of (batch_size, 4096/8=512)
             with tf.device('/gpu:0'):
                 num_splits = int(timesteps/time_pool)
-                stride_rnn_input = tf.cast(input_layer, tf.float64)
-                print('num_splits=%d (this is the number of timesteps fed to RNN)' % num_splits)
-                stride_rnn_input = tf.split(stride_rnn_input, num_or_size_splits=num_splits, axis=1)        #([batch_size, time_pool] * num_splits)
-                stride_rnn_input = tf.stack(stride_rnn_input, axis=1)                                       #(batch_size, num_splits, time_pool))
-                
-                stride_min = tf.reduce_min(stride_rnn_input, axis=2)
-                stride_max = tf.reduce_max(stride_rnn_input, axis=2)
-                stride_mean, stride_var = tf.nn.moments(stride_rnn_input, axes=[2])
-                print('stride_min', stride_min)
-                print('stride_max', stride_max)
-                print('stride_mean', stride_mean)
-                print('stride_var', stride_var)
-                stride_rnn_input = tf.stack([stride_min, stride_max, stride_mean, stride_var], axis=2)
-                print('stride_rnn_input', stride_rnn_input)
-                #am = tf.argmax(tf.abs(stride_rnn_input), axis=2)                                            #(batch_size, num_splits)
-                #am_expanded = tf.one_hot(am, depth=time_pool, axis=-1, dtype=tf.float64)                    #(batch_size, num_splits, time_pool)
-                #stride_rnn_input = tf.reduce_sum(tf.multiply(am_expanded, stride_rnn_input), axis=2, keepdims=True)  #(batch_size, num_splits, 1)
+                stride_rnn_input = tf.cast(to_timepool(input_layer, timesteps, time_pool), tf.float64)
                 stride_rnn_input = tf.transpose(stride_rnn_input, [1, 0, 2])                                #(num_splits, batch_size, 1)
                 print('stride_rnn_input', stride_rnn_input)
 
@@ -430,6 +439,8 @@ def lstm_4096_model_fn(features, labels, mode, params):
         print('total stride elems per batch:', stride_units)
         stack_stride = tf.reshape(final_stride_outputs, (-1, stride_units))
     
+        # or, if you only want to use the last state:
+        stack_stride = tf.reshape(final_stride_outputs[:,-1,:], (-1, int(stride_units/stride_steps)))
     concats = []
     if use_stride_cnn:
         concats.append(final_stride_cnn_output)
@@ -518,6 +529,7 @@ def lstm_4096_model_fn(features, labels, mode, params):
     
     # Create train op
     with tf.variable_scope('optimization'):
+        learning_rate = tf.train.exponential_decay(learning_rate, tf.train.get_global_step(), 200, 0.96, staircase=True)
         if optimizer_name == 'Adam':
             optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
         elif optimizer_name == 'SGD':

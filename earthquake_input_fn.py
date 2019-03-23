@@ -24,7 +24,7 @@ def _deserialize_earthquakes2(serialized_examples, timesteps, training, noise):
     dataset = tf.data.Dataset.from_tensor_slices(({'acousticdata': features['acousticdata'] / 5515.0}, features['tminus'] / 16.1))
     if training:
         dataset = dataset.skip(1 + np.random.randint(timesteps - 1))
-    dataset = dataset.batch(timesteps, drop_remainder=True)
+    dataset = dataset.batch(timesteps, drop_remainder=True).take(1)
     return dataset
 
 
@@ -32,7 +32,8 @@ def earthquake_input_fn2(basedir, batch_size, timesteps, noise=0.001, window_shi
     if not traintest in ('train', 'test'):
         raise AssertionError('must specify traintest as "train" or "test"')
     if not 150000 % timesteps == 0:
-        raise AssertionError('timesteps should divide 150k otherwise your test data is messed up')
+        # raise AssertionError('timesteps should divide 150k otherwise your test data is messed up')
+        pass
     files = glob(osp.join(basedir, traintest, '*.tfrecord'))
     if traintest == 'train':
         np.random.seed(np.int64(time()))
