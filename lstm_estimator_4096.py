@@ -55,7 +55,7 @@ def to_timepool(tens, timesteps, time_pool):
     
     bes0_min, bes0_max, bes0_mean, bes0_var = extract_stats(tf.math.bessel_i0e(stride_input), axnum=2)
     
-    bes1_min, bes1_max, bes1_mean, bes0_var = extract_stats(tf.math.bessel_i1e(stride_input), axnum=2)
+    bes1_min, bes1_max, bes1_mean, bes1_var = extract_stats(tf.math.bessel_i1e(stride_input), axnum=2)
     
     stride_roc = stride_input[:,:,1:] - stride_input[:,:,:-1]
     stride_minroc, stride_maxroc, stride_meanroc, stride_varroc = extract_stats(stride_roc, axnum=2)
@@ -68,6 +68,14 @@ def to_timepool(tens, timesteps, time_pool):
     
     stride_kurt = stride_skew[:,:,1:] - stride_skew[:,:,:-1]
     kurt_min, kurt_max, kurt_mean, kurt_var = extract_stats(stride_kurt, axnum=2)
+     
+    s25 = stride_input[:,:,::25]
+    s25_roc = s25[:,:,1:] - s25[:,:,:-1]
+    s25_roc_min, s25_roc_max, s25_roc_mean, s25_roc_var = extract_stats(s25_roc, axnum=2)
+     
+    s50 = stride_input[:,:,::50]
+    s50_roc = s50[:,:,1:] - s50[:,:,:-1]
+    s50_roc_min, s50_roc_max, s50_roc_mean, s50_roc_var = extract_stats(s50_roc, axnum=2)
     
     print('stride_min', stride_min)
     print('stride_max', stride_max)
@@ -83,12 +91,14 @@ def to_timepool(tens, timesteps, time_pool):
     print('stride_varroroc', stride_varroroc)
     
     stride_input = tf.stack([stride_min, stride_max, stride_mean, stride_var,
-                             bes0_min, bes0_max, bes0_mean, bes0_var,
-                             bes1_min, bes1_max, bes1_mean, bes1_var,
+                             # bes0_min, bes0_max, bes0_mean, bes0_var,
+                             # bes1_min, bes1_max, bes1_mean, bes1_var,
                              stride_minroc, stride_maxroc, stride_meanroc, stride_varroc,
                              stride_minroroc, stride_maxroroc, stride_meanroroc, stride_varroroc,
                              skew_min, skew_max, skew_mean, skew_var,
-                             kurt_min, kurt_max, kurt_mean, kurt_var], axis=2)
+                             kurt_min, kurt_max, kurt_mean, kurt_var,
+                             s25_roc_min, s25_roc_max, s25_roc_mean, s25_roc_var,
+                             s50_roc_min, s50_roc_max, s50_roc_mean, s50_roc_var], axis=2)
     return stride_input
     
 def lstm_4096_model_fn(features, labels, mode, params):
@@ -159,7 +169,7 @@ def lstm_4096_model_fn(features, labels, mode, params):
             print('stride_cnn_input', stride_cnn_input)
         
         # Create CNN layers
-        with tf.variable_scope('stride_cnn_structures'):
+        with tf.variable_scope('stride_cnn_encoder_structures'):
             with tf.device('/gpu:0'):
                 stride_cnn = stride_cnn_input
                 stride_cnn_activations = [stride_cnn]
@@ -174,8 +184,8 @@ def lstm_4096_model_fn(features, labels, mode, params):
                                                 name='output-0')
                 if not all(map(lambda x: x['filters'] == cnn_spec[0]['filters'], cnn_spec)):
                     raise Exception('all CNN filter sizes should be equal')
-                if not all(map(lambda x: x['kernel_size'] == cnn_spec[0]['kernel_size'], cnn_spec)):
-                    raise Exception('all CNN kernel sizes should be equal')
+                # if not all(map(lambda x: x['kernel_size'] == cnn_spec[0]['kernel_size'], cnn_spec)):
+                    # raise Exception('all CNN kernel sizes should be equal')
                 for i, cnn_layer_spec in enumerate(cnn_spec):
                     s = cnn_layer_spec
                     stride_cnn_input = stride_cnn
@@ -226,17 +236,27 @@ def lstm_4096_model_fn(features, labels, mode, params):
                     stride_cnn = stride_output * qrnn_c
                     
                     if s['max_pool']:
-                        stride_cnn = tf.layers.MaxPooling1D(2, 2)(stride_cnn)
-                        qrnn_c = tf.layers.MaxPooling1D(2, 2)(qrnn_c)
+                        pl = s['max_pool']
+                        stride_cnn = tf.layers.MaxPooling1D(pl, pl)(stride_cnn)
+                        qrnn_c = tf.layers.MaxPooling1D(pl, pl)(qrnn_c)
                     stride_cnn_activations.append(stride_cnn)
                     print('stride cnn layer %d: %s' % (i, stride_cnn))
                 
                 
+        with tf.variable_scope('stride_cnn_decoder_structures'):
+            with tf.device('/gpu:0'):
+                for i, cnn_layer_spec in zip(range(len(cnn_spec) - 1, -1, -1), cnn_spec[::-1]):
+                    f = cnn_layer_spec['filters']
+                    pl = cnn_layer_spec['max_pool']
+                    ks = cnn_layer_spec['kernel_size']
+            
+                    stride_cnn = tf.layer.Conv2dTranspose(filters=f, kernel_size=)
         print('stride cnn (output)', stride_cnn)
         stride_steps = num_splits
         for cnn_layer_spec in cnn_spec:
-            stride_steps = stride_steps if cnn_layer_spec['max_pool'] == 0 else int(stride_steps / 2)
+            stride_steps = stride_steps if not cnn_layer_spec['max_pool'] else int(stride_steps / cnn_layer_spec['max_pool'])
         final_stride_cnn_output = tf.reshape(stride_cnn, (-1, int(stride_steps * cnn_spec[-1]['filters'])))
+        # final_stride_cnn_output = tf.reshape(stride_cnn, (-1, int(stride_steps * 4)))
         print('reshaped stride cnn output', final_stride_cnn_output)
         
         # Regularization
