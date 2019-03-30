@@ -23,8 +23,9 @@ def _deserialize_earthquakes2(serialized_examples, timesteps, training, noise):
         features['acousticdata'] = tf.clip_by_value(features['acousticdata'] * tf.random.normal((LEN,), mean=1, stddev=noise ** 2) + tf.random.normal((LEN,), mean=0, stddev=noise), features['acousticdata'] - noise * 1.96, features['acousticdata'] + noise * 1.96)
     dataset = tf.data.Dataset.from_tensor_slices(({'acousticdata': features['acousticdata'] / 5515.0}, features['tminus'] / 16.1))
     if training:
-        dataset = dataset.skip(1 + np.random.randint(timesteps - 1))
-    dataset = dataset.batch(timesteps, drop_remainder=True).take(1)
+        #dataset = dataset.skip(1 + np.random.randint(timesteps - 1))
+        pass
+    dataset = dataset.batch(timesteps, drop_remainder=True)
     return dataset
 
 
