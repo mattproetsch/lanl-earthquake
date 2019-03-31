@@ -1,5 +1,5 @@
 import tensorflow as tf
-from hooks import ModelStepTrackerHook
+from hooks import ModelStepTrackerHook, SlimVarAnalyzer
 
 def build_dropout_lstm_cell(num_units, activation, reuse,
                             dtype, dropout_rate,
@@ -201,7 +201,7 @@ def lstm_4096_model_fn(features, labels, mode, params):
                 output_layer = None
                 if not all(map(lambda x: x['filters'] == cnn_spec[0]['filters'], cnn_spec[:-1])):
                     raise Exception('all CNN filter sizes (except last) should be equal')
-                    
+                
                 for i, cnn_layer_spec in enumerate(cnn_spec[:-1]):
                     s = cnn_layer_spec
                     if s['skip'] is not None:
@@ -210,54 +210,64 @@ def lstm_4096_model_fn(features, labels, mode, params):
                         activation = tf.nn.leaky_relu
                     
                     stride_cnn_input = stride_cnn
+                    stride = cnn_layer_spec['stride']
                     if i == 0:
-                        stride_cnn_activation = tf.layers.Conv1D(filters=s['filters'], kernel_size=s['kernel_size'],
+                        stride_cnn_activation = tf.layers.Conv1D(filters=s['filters'], kernel_size=s['kernel_size'], strides=stride,
                                                              padding='same', activation=activation, dtype=tf.float64,
                                                              kernel_initializer=tf.contrib.layers.xavier_initializer(uniform=False,
                                                                                                                      dtype=tf.float64),
                                                              name='conv-%d' % i, trainable=trainable)(stride_cnn) 
-                        qrnn_c = stride_cnn_activation
-                        stride_cnn = stride_cnn_activation
-                        print('first cnn layer: ', stride_cnn)
+                        print('creating new output/forget gates')
+                        forget_layer = tf.layers.Conv1D(filters=cnn_spec[0]['filters'], kernel_size=cnn_spec[0]['kernel_size'], strides=stride,
+                                                        padding='same', activation=tf.nn.sigmoid, dtype=tf.float64,
+                                                        kernel_initializer=tf.contrib.layers.xavier_initializer(uniform=True, dtype=tf.float64),
+                                                        name='forget-0', trainable=trainable)
+                        output_layer = tf.layers.Conv1D(filters=cnn_spec[0]['filters'], kernel_size=cnn_spec[0]['kernel_size'], strides=stride,
+                                                        padding='same', activation=tf.nn.sigmoid, dtype=tf.float64,
+                                                        kernel_initializer=tf.contrib.layers.xavier_initializer(uniform=True, dtype=tf.float64),
+                                                        name='output-0', trainable=trainable)
+
+                        qrnn_c = tf.zeros_like(stride_cnn_activation)
                         
                     else:
-                        stride_cnn_activation = tf.layers.Conv1D(filters=s['filters'], kernel_size=s['kernel_size'],
+                        stride_cnn_activation = tf.layers.Conv1D(filters=s['filters'], kernel_size=s['kernel_size'], strides=stride,
                                                                  padding='same', activation=activation, dtype=tf.float64,
                                                                  kernel_initializer=tf.contrib.layers.xavier_initializer(uniform=False,
                                                                                                                          dtype=tf.float64),
                                                                  name='conv-%d' % i, trainable=trainable)(stride_cnn)
-                        if i > 0 and stride_cnn_activations[-1].shape[-1] != stride_cnn_activations[-2].shape[-1]:
+                        if i > 0 and stride_cnn_activations[-1].shape[-1] != stride_cnn_activations[-2].shape[-1] or True:
                             print('creating new output/forget gates')
-                            forget_layer = tf.layers.Conv1D(filters=cnn_spec[0]['filters'], kernel_size=cnn_spec[0]['kernel_size'],
+                            forget_layer = tf.layers.Conv1D(filters=s['filters'], kernel_size=s['kernel_size'], strides=stride,
                                                             padding='same', activation=tf.nn.sigmoid, dtype=tf.float64,
                                                             kernel_initializer=tf.contrib.layers.xavier_initializer(uniform=True, dtype=tf.float64),
-                                                            name='forget-0', trainable=trainable)
-                            output_layer = tf.layers.Conv1D(filters=cnn_spec[0]['filters'], kernel_size=cnn_spec[0]['kernel_size'],
+                                                            name='forget-%d' % i, trainable=trainable)
+                            output_layer = tf.layers.Conv1D(filters=s['filters'], kernel_size=s['kernel_size'], strides=stride,
                                                             padding='same', activation=tf.nn.sigmoid, dtype=tf.float64,
                                                             kernel_initializer=tf.contrib.layers.xavier_initializer(uniform=True, dtype=tf.float64),
-                                                            name='output-0', trainable=trainable)
+                                                            name='output-%d' % i, trainable=trainable)
 
-                        stride_forget = forget_layer(stride_cnn)
-                        stride_output = output_layer(stride_cnn)
+                    stride_forget = forget_layer(stride_cnn)
+                    stride_output = output_layer(stride_cnn)
 
-                        if s['batch_norm']:
-                            stride_cnn_activation = tf.layers.batch_normalization(stride_cnn_activation,
+                    if s['batch_norm']:
+                        stride_cnn_activation = tf.layers.batch_normalization(stride_cnn_activation,
                                                                        training=mode == tf.estimator.ModeKeys.TRAIN)
 
-                        if mode == tf.estimator.ModeKeys.TRAIN and s['dropout']:
-                            # Apply zoneout-like dropout per Bradbury 2016
-                            stride_forget = 1 - tf.layers.Dropout(rate=dropout_rate)(stride_forget)
+                    if mode == tf.estimator.ModeKeys.TRAIN and s['dropout']:
+                        # Apply zoneout-like dropout per Bradbury 2016
+                        # fractional dropout
+                        stride_forget = 1 - tf.layers.Dropout(rate=((len(cnn_spec) - i) * dropout_rate))(stride_forget)
 
-                        if s['skip'] is not None:
-                            # gated skip connections (peephole?)
-                            # qrnn_i = stride_input * stride_cnn_activations[-s['skip']] + tf.nn.leaky_relu(stride_cnn_activation)
-                            qrnn_i = tf.nn.leaky_relu(stride_cnn_activations[-s['skip']] + stride_cnn_activation)
-                        else:
-                            qrnn_i = stride_cnn_activation
+                    if s['skip'] is not None:
+                        # gated skip connections (peephole?)
+                        # qrnn_i = stride_input * stride_cnn_activations[-s['skip']] + tf.nn.leaky_relu(stride_cnn_activation)
+                        qrnn_i = tf.nn.leaky_relu(stride_cnn_activations[-s['skip']] + stride_cnn_activation)
+                    else:
+                        qrnn_i = stride_cnn_activation
 
-                        print('forgetting...')
-                        qrnn_c = stride_forget * qrnn_c + (1 - stride_forget) * qrnn_i
-                        stride_cnn = stride_output * qrnn_c
+                    print('forgetting...')
+                    qrnn_c = stride_forget * qrnn_c + (1 - stride_forget) * qrnn_i
+                    stride_cnn = stride_output * qrnn_c
                     
                     if s['max_pool']:
                         pl = s['max_pool']
@@ -281,6 +291,7 @@ def lstm_4096_model_fn(features, labels, mode, params):
         stride_steps = num_splits
         for cnn_layer_spec in cnn_spec:
             stride_steps = stride_steps if not cnn_layer_spec['max_pool'] else int(stride_steps / cnn_layer_spec['max_pool'])
+            stride_steps = int(stride_steps / cnn_layer_spec['stride'])
               
         if use_deconv:
             with tf.variable_scope('stride_cnn_decoder_structures'):
@@ -581,14 +592,18 @@ def lstm_4096_model_fn(features, labels, mode, params):
             'pred': results,
             # 'dense_feats': dense_layers[-2]
         }
-        return tf.estimator.EstimatorSpec(mode, predictions=predictions)
+        return tf.estimator.EstimatorSpec(mode, predictions=predictions, prediction_hooks=[SlimVarAnalyzer()])
     
         
     with tf.variable_scope('loss_sse'):
         # calculate sum of squared errors
         loss += tf.reduce_sum(tf.square(target[:,-1] - results), name='loss_sse')
         # loss += tf.reduce_sum(tf.square(input_feats - results), name='loss_ae')
-        l2_penalty = tf.cast(tf.train.exponential_decay(lambda_l2_reg, tf.train.get_global_step(), 200, 0.92, staircase=True), tf.float64)
+        l2_penalty = tf.cast(tf.train.exponential_decay(lambda_l2_reg,
+                                                        tf.train.get_global_step(),
+                                                        400,
+                                                        0.92,
+                                                        staircase=True), tf.float64)
         l2 = l2_penalty * sum(
             tf.nn.l2_loss(tf.cast(tf_var, tf.float64))
                 for tf_var in tf.trainable_variables()
@@ -612,7 +627,7 @@ def lstm_4096_model_fn(features, labels, mode, params):
     eval_metrics.update({'mse': mse_op, 'mae': mae_op})
     
     if mode == tf.estimator.ModeKeys.EVAL:
-        return tf.estimator.EstimatorSpec(mode, loss=loss, eval_metric_ops=eval_metrics)
+        return tf.estimator.EstimatorSpec(mode, loss=loss, eval_metric_ops=eval_metrics, evaluation_hooks=[SlimVarAnalyzer()])
     
     
     assert mode == tf.estimator.ModeKeys.TRAIN, 'invalid mode key: ' + str(mode)
@@ -621,7 +636,11 @@ def lstm_4096_model_fn(features, labels, mode, params):
     
     # Create train op
     with tf.variable_scope('optimization'):
-        learning_rate = tf.train.exponential_decay(learning_rate, tf.train.get_global_step(), 200, 0.96, staircase=True)
+        learning_rate = tf.train.exponential_decay(learning_rate,
+                                                   tf.train.get_global_step(),
+                                                   400,
+                                                   0.96,
+                                                   staircase=True)
         tf.summary.scalar('loss_sse/learning_rate', learning_rate)
         if optimizer_name == 'Adam':
             optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
@@ -670,4 +689,4 @@ def lstm_4096_model_fn(features, labels, mode, params):
             train_op = optimizer.apply_gradients(zip(clipped, tfvars), global_step=tf.train.get_global_step())
         
             
-    return tf.estimator.EstimatorSpec(mode, loss=loss, train_op=train_op)
+    return tf.estimator.EstimatorSpec(mode, loss=loss, train_op=train_op, training_hooks=[SlimVarAnalyzer()])

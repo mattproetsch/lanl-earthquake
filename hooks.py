@@ -44,3 +44,71 @@ class ModelStepTrackerHook(tf.train.SessionRunHook):
     def after_run(self, run_context, run_values):
         self._steps += 1
         self._step_needs_update = True
+        
+
+class SlimVarAnalyzer(tf.train.SessionRunHook):
+    """
+    Uses two functions from tf.contrib.slim@83d33cc on Dec 5, 2016
+    tf.contrib.slim.model_analyzer.analyze_vars, and
+    tf.contrib.slim.model_analyzer.tensor_description
+    """
+    
+    def __init__(self):
+        pass
+    
+    def _tensor_description(self, var):
+        """
+        Returns a compact and informative string about a tensor.
+        Args:
+            var: A tensor variable.
+        Returns:
+            a string with type and size, e.g.: (float32 1x8x8x1024).
+        """
+        description = '(' + str(var.dtype.name) + ' '
+        sizes = var.get_shape()
+        for i, size in enumerate(sizes):
+            description += str(size)
+            if i < len(sizes) - 1:
+                description += 'x'
+        description += ')'
+        return description
+        
+        
+    def _analyze_vars(self, variables):
+        """
+        Prints the names and shapes of the variables.
+        Args:
+            variables: list of variables, for example tf.global_variables().
+            print_info: Optional, if true print variables and their shape.
+        Returns:
+            A printable string with model parameter information
+        """
+        
+        s = ''
+        s += '----------\n'
+        s += 'Variables: name (type shape) [size]\n'
+        s += '----------\n'
+        
+        total_size = 0
+        total_bytes = 0
+        for var in variables:
+            # if var.num_elements() is None or [] assume size 0.
+            var_size = var.get_shape().num_elements() or 0
+            var_bytes = var_size * var.dtype.size
+            total_size += var_size
+            total_bytes += var_bytes
+            s += '%s %s [%d, bytes: %d]\n' % (var.name, self._tensor_description(var),
+                                                var_size, var_bytes)
+        s += 'Total size of variables: %d\n' % total_size
+        s += 'Total bytes of variables: %d\n' % total_bytes
+        return s
+                
+    def _model_summary(self):
+        model_vars = tf.trainable_variables()
+        return self._analyze_vars(model_vars)
+    
+    #def before_run(self, run_context):
+        #print(self._model_summary())
+    
+    def begin(self):
+        print(self._model_summary())
