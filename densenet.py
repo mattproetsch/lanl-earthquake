@@ -3,6 +3,7 @@ import numpy as np
 from hooks import SlimVarAnalyzer
 from process_inputs import to_timepool
 import re
+from time import strftime
 
 
 class DenseNet(object):
@@ -13,8 +14,23 @@ class DenseNet(object):
     https://github.com/taki0112/Densenet-Tensorflow/blob/dd2db93c529455beb36edf5c40bc5e236b7b1a79/MNIST/Densenet_MNIST.py
     """
 
+
+    def _log(self, layer_name, var_name, tens):
+        if not self._DEBUG:
+            return
+        
+        description = '(' + str(tens.dtype.name) + ' '
+        sizes = tens.get_shape()
+        for i, size in enumerate(sizes):
+            description += str(size)
+            if i < len(sizes) - 1:
+                description += 'x'
+        description += ')'
+        msg = '[%s] [%s]: %s %s' % (strftime('%Y-%m-%d %H:%M:%S'), layer_name, var_name, description)
+        print(msg)
+
     def __init__(self, batch_size, timesteps, growth_rate, layer_sizes, training, dropout_rate,
-                 compression_theta, dense_size):
+                 compression_theta, dense_size, debug=False):
         self.batch_size = batch_size
         self.timesteps = timesteps
         self.growth_rate = growth_rate
@@ -23,6 +39,7 @@ class DenseNet(object):
         self.dropout_rate = dropout_rate
         self.theta = compression_theta
         self.dense_size = dense_size
+        self._DEBUG = debug
 
 
     def __call__(self, inputs):
@@ -67,14 +84,17 @@ class DenseNet(object):
 
 
     def _input_layer(self, x):
-        with tf.variable_scope('input_layer'):
+        layer_name = 'input_layer'
+        with tf.variable_scope(layer_name):
             x = self._conv_1d(x, self.growth_rate * 2, 7, 2, 'conv1d')
             x = self._avg_pool_1d(x, 3, 2, 'avg_pool')
+        self._log(layer_name, 'x', x)
         return x
 
 
     def _bottleneck_layer(self, x, bottleneck_layer_id):
-        with tf.variable_scope('bottleneck_' + str(bottleneck_layer_id)):
+        layer_name = 'bottleneck_' + str(bottleneck_layer_id)
+        with tf.variable_scope(layer_name):
             x = self._batch_norm(x, '0_batchnorm')
             x = self._relu(x)
             x = self._conv_1d(x, 4 * self.growth_rate, 1, 1, '0_conv1d')
@@ -84,28 +104,37 @@ class DenseNet(object):
             x = self._relu(x)
             x = self._conv_1d(x, self.growth_rate, 3, 1, '1_conv1d')
             x = self._dropout(x, self.dropout_rate)
+        self._log(layer_name, 'x', x)
         return x
 
 
     def _transition_layer(self, x, transition_layer_id):
-        with tf.variable_scope('transition_' + str(transition_layer_id)):
+        layer_name = 'transition_' + str(transition_layer_id)
+        with tf.variable_scope(layer_name):
             x = self._batch_norm(x, 'batchnorm')
             x = self._relu(x)
             out_channels = int(x.get_shape().as_list()[-1] * self.theta)
             x = self._conv_1d(x, out_channels, 1, 1, 'conv1d')
             x = self._dropout(x, self.dropout_rate)
             x = self._avg_pool_1d(x, 2, 2, 'avg_pool')
+        self._log(layer_name, 'x', x)
         return x
 
 
     def _dense_block(self, x, num_layers, dense_block_id):
-        with tf.variable_scope('dense_block_' + str(dense_block_id)):
+        layer_name = 'dense_block_' + str(dense_block_id)
+        with tf.variable_scope(layer_name):
             layer_outputs = [x]
+            self._log(layer_name, 'layer_outputs[0]', layer_outputs[0])
             for i in range(num_layers):
                 next_layer_input = tf.concat(layer_outputs, axis=2)
+                self._log(layer_name, 'next_layer_input', next_layer_input)
                 next_layer_output = self._bottleneck_layer(next_layer_input, i)
+                self._log(layer_name, 'next_layer_output', next_layer_output)
                 layer_outputs.append(next_layer_output)
-        return tf.concat(layer_outputs, axis=2)
+        output = tf.concat(layer_outputs, axis=2)
+        self._log(layer_name, 'output', output)
+        return output
 
 
     def _dense_net(self, x):
@@ -113,18 +142,21 @@ class DenseNet(object):
         for block_id, layer_size in enumerate(self.layer_sizes[:-1]):
             x = self._dense_block(x, layer_size, block_id)
             x = self._transition_layer(x, block_id)
-            
+
         # no transition layer after final block, so handle it outside the loop
         x = self._dense_block(x, self.layer_sizes[-1], len(self.layer_sizes) - 1)
-        
+        self._log('dense_net', 'x', x)
+
         # output preparation and processing
         x = self._batch_norm(x, 'pre_output_batchnorm')
         x = self._relu(x)
         x = self._global_avg_pool_1d(x)
-        x = self._dense(x, self.dense_size, 'pre_output_dense')
-        x = self._batch_norm(x, 'output_batchnorm')
-        x = self._relu(x)
+        self._log('dense_net', 'x', x)
+        # x = self._dense(x, self.dense_size, 'pre_output_dense')
+        # x = self._batch_norm(x, 'output_batchnorm')
+        # x = self._relu(x)
         x = self._dense(x, 1, 'output_dense')
+        self._log('dense_net', 'x', x)
         return x
 
 
@@ -137,6 +169,7 @@ def clean_varname(varname):
 
 
 def densenet_model_fn(features, labels, mode, params):
+    print(params)
     batch_size = params['batch_size']
     timesteps = params['timesteps']
     time_pool = params['time_pool']
@@ -148,8 +181,12 @@ def densenet_model_fn(features, labels, mode, params):
     feature_columns = params['feature_columns']
     optimizer_name = params['optimizer_name']
     learning_rate = params['learning_rate']
+    weight_decay = params['weight_decay']
+    momentum = params['momentum']
+    nesterov = params['nesterov']
     lambda_l2_reg = params['lambda_l2_reg']
     grad_clip = params['grad_clip']
+    DEBUG = False
 
     training = mode == tf.estimator.ModeKeys.TRAIN
 
@@ -161,7 +198,7 @@ def densenet_model_fn(features, labels, mode, params):
     # create and run network
     with tf.device('/gpu:0'):
         dense_net = DenseNet(batch_size, timesteps, growth_rate, layer_sizes,
-                         training, dropout_rate, theta, dense_size)
+                         training, dropout_rate, theta, dense_size, debug=DEBUG)
         results = dense_net(input_column_features)
 
     target = labels[:,-1]
@@ -183,7 +220,7 @@ def densenet_model_fn(features, labels, mode, params):
         # loss += tf.reduce_sum(tf.square(input_feats - results), name='loss_ae')
         l2_penalty = tf.cast(tf.train.exponential_decay(lambda_l2_reg,
                                                         tf.train.get_global_step(),
-                                                        400,
+                                                        1600,
                                                         0.92,
                                                         staircase=True), tf.float64)
         l2 = l2_penalty * sum(
@@ -220,7 +257,7 @@ def densenet_model_fn(features, labels, mode, params):
     with tf.variable_scope('optimization'):
         learning_rate = tf.train.exponential_decay(learning_rate,
                                                    tf.train.get_global_step(),
-                                                   400,
+                                                   1600,
                                                    0.96,
                                                    staircase=True)
         tf.summary.scalar('loss_sse/learning_rate', learning_rate)
@@ -230,25 +267,26 @@ def densenet_model_fn(features, labels, mode, params):
             optimizer = tf.train.GradientDescentOptimizer(learning_rate=learning_rate)
         elif optimizer_name == 'RMSProp':
             optimizer = tf.train.RMSPropOptimizer(learning_rate=learning_rate)
+        elif optimizer_name == 'MomentumW':
+            optimizer = tf.contrib.opt.MomentumWOptimizer(weight_decay=weight_decay, learning_rate=learning_rate, momentum=momentum,
+                                                          use_nesterov=nesterov)
         else:
             raise Exception('Unsupported optimizer: ' + str(optimizer))
-        #return tf.estimator.EstimatorSpec(mode, loss=loss, train_op=optimizer.minimize(loss, global_step=tf.train.get_global_step()))
 
         update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
         with tf.control_dependencies(update_ops):
             gradient_var_pairs = optimizer.compute_gradients(loss)
-            #gvps = gradient_var_pairs 
             gvps = list(filter(lambda gvp: gvp[0] is not None, gradient_var_pairs))
             tfvars = [x[1] for x in gvps]
             grad_dtypes = [x[0].dtype for x in gvps]
             gradients = [tf.cast(x[0], tf.float64) for x in gvps]
-            #print('GRADIENTS:\n\t' + '\n\t'.join(list(map(str, gradients))))
             clipped, _ = tf.clip_by_global_norm(gradients, grad_clip)
-            #print('CLIPPED  :\n\t' + '\n\t'.join(list(map(str, clipped))))
             tf.summary.histogram('grad_norm', tf.global_norm(clipped))
-            for x, y in zip(clipped, tfvars):
-                tf.summary.histogram('VAR_' + clean_varname(str(y)), y)
-                tf.summary.histogram('GRAD_' + clean_varname(str(y)), x)
+            # this shows activations and gradients for all variables... but we have too many in DenseNet.
+            #for x, y in zip(clipped, tfvars):
+            #    tf.summary.histogram('VAR_' + clean_varname(str(y)), y)
+            #    tf.summary.histogram('GRAD_' + clean_varname(str(y)), x)
+            tf.summary.histogram('VAR_results', results)
             clipped = [tf.cast(g, grad_dtypes[i]) for i, g in enumerate(clipped)]
             train_op = optimizer.apply_gradients(zip(clipped, tfvars), global_step=tf.train.get_global_step())
             #train_op = optimizer.minimize(loss, global_step=tf.train.get_global_step())

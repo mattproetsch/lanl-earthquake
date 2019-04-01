@@ -28,7 +28,7 @@ def _deserialize_earthquakes2(serialized_examples, timesteps, training, noise):
     return dataset
 
 
-def earthquake_input_fn2(basedir, batch_size, timesteps, noise=0.001, window_shift=None, traintest='none', eager=False, seed=1234):
+def earthquake_input_fn2(basedir, batch_size, timesteps, noise=0.001, window_shift=None, traintest='none', epochs=1, eager=False, seed=1234):
     if not traintest in ('train', 'test'):
         raise AssertionError('must specify traintest as "train" or "test"')
     if not 150000 % timesteps == 0:
@@ -41,6 +41,8 @@ def earthquake_input_fn2(basedir, batch_size, timesteps, noise=0.001, window_shi
         np.random.seed(np.int64(seed))
     files = np.random.permutation(files)
     dataset = tf.data.Dataset.from_tensor_slices(files)
+    if traintest == 'train':
+        dataset = dataset.repeat(epochs).shuffle(1000)
     dataset = tf.data.TFRecordDataset(dataset, num_parallel_reads=16)
     dataset = dataset.apply(tf.data.experimental.parallel_interleave(lambda x: _deserialize_earthquakes2(x,
                                                                                                          timesteps,
