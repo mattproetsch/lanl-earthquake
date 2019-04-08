@@ -66,11 +66,15 @@ class SlimVarAnalyzer(tf.train.SessionRunHook):
         """
         description = '(' + str(var.dtype.name) + ' '
         sizes = var.get_shape()
-        for i, size in enumerate(sizes):
-            description += str(size)
-            if i < len(sizes) - 1:
-                description += 'x'
+        try:
+            for i, size in enumerate(sizes):
+                description += str(size)
+                if i < len(sizes) - 1:
+                    description += 'x'
+        except:
+            description += 'unknown size'
         description += ')'
+        
         return description
         
         

@@ -12,20 +12,20 @@ def extract_pctiles(tens, *pctiles):
     return tf.concat([tf.contrib.distributions.percentile(tens, p, axis=2, keep_dims=True) for p in pctiles], axis=2)
 
 
-def to_stft(tens, timesteps, window_size, window_step):
+def to_stft(tens, timesteps, window_size, window_step, dtype):
     stft_input = tf.reshape(tens, [-1, timesteps])
     stft_input = tf.contrib.signal.stft(stft_input, frame_length=window_size,
                                         frame_step=window_step, pad_end='None', name='stft_op')
     stft_input = tf.real(stft_input * tf.conj(stft_input))
     log_offset = 1e-6
     stft_input = tf.log(stft_input + log_offset)  # take log power, as is tradition
-    stft_input = tf.cast(stft_input, tf.float64)
+    stft_input = tf.cast(stft_input, dtype)
     tf.summary.histogram('stft_input', stft_input)
     print('stft_input', stft_input)
     return stft_input
 
 
-def to_timepool(tens, timesteps, time_pool):
+def to_timepool(tens, timesteps, time_pool, dtype):
     """
     take pooled features every time_pool steps 
     for 4096 input w/ time_pool=8, we take abs max of every 8 timesteps for a resulting dimension of (batch_size, 4096/8=512)
@@ -33,64 +33,64 @@ def to_timepool(tens, timesteps, time_pool):
     
     stride_input = tf.reshape(tens, [-1, timesteps])
     num_splits = int(timesteps/time_pool)
-    stride_input = tf.cast(tens, tf.float64)
+    stride_input = tf.cast(tens, dtype)
+    
+    def order_split(tens, order):
+        tens = tf.pad(tens, [[0, 0], [order, 0]])
+        tens = tf.split(tens, num_or_size_splits=num_splits, axis=1)
+        tens = tf.stack(tens, axis=1)
+        return tens
+    
+    stride_input_o1 = stride_input
+    stride_input_o2 = stride_input_o1[:,1:] - stride_input_o1[:,:-1]
+    stride_input_o3 = stride_input_o2[:,1:] - stride_input_o2[:,:-1]
+    stride_input_o4 = stride_input_o3[:,1:] - stride_input_o3[:,:-1]
+    stride_input_o5 = stride_input_o4[:,1:] - stride_input_o4[:,:-1]
+    
+    stride_input_o1 = order_split(stride_input_o1, 0)
+    stride_input_o2 = order_split(stride_input_o2, 1)
+    stride_input_o3 = order_split(stride_input_o3, 2)
+    stride_input_o4 = order_split(stride_input_o4, 3)
+    stride_input_o5 = order_split(stride_input_o5, 4)
+    
+    print('stride_input_o1', stride_input_o1)
+    print('stride_input_o2', stride_input_o2)
+    print('stride_input_o3', stride_input_o3)
+    print('stride_input_o4', stride_input_o4)
+    
     print('num_splits=%d (this is the number of timesteps fed to stride CNN)' % num_splits)
-    stride_input = tf.split(stride_input, num_or_size_splits=num_splits, axis=1)        #([batch_size, time_pool] * num_splits)
-    stride_input = tf.stack(stride_input, axis=1)                                       #(batch_size, num_splits, time_pool))
     
-    stride_min, stride_max, stride_mean, stride_var = extract_stats(stride_input, axnum=2)
-    stride_pctiles = extract_pctiles(stride_input, 1, 5, 25, 50, 75, 99)
+    stride_o1_min, stride_o1_max, stride_o1_mean, stride_o1_var = extract_stats(stride_input_o1, axnum=2)
+    stride_o1_pctiles = extract_pctiles(stride_input_o1, 1, 5, 25, 50, 75, 99)
     
-    stride_roc = stride_input[:,:,1:] - stride_input[:,:,:-1]
-    stride_minroc, stride_maxroc, stride_meanroc, stride_varroc = extract_stats(stride_roc, axnum=2)
-    stride_roc_pctiles = extract_pctiles(stride_roc, 1, 5, 25, 50, 75, 99)
+    stride_o2_min, stride_o2_max, stride_o2_mean, stride_o2_var = extract_stats(stride_input_o2, axnum=2)
+    stride_o2_pctiles = extract_pctiles(stride_input_o2, 1, 5, 25, 50, 75, 99)
     
-    stride_roroc = stride_roc[:,:,1:] - stride_roc[:,:,:-1]
-    stride_minroroc, stride_maxroroc, stride_meanroroc, stride_varroroc = extract_stats(stride_roroc, axnum=2)
-    stride_roroc_pctiles = extract_pctiles(stride_roroc, 1, 5, 25, 50, 75, 99)
+    stride_o3_min, stride_o3_max, stride_o3_mean, stride_o3_var = extract_stats(stride_input_o3, axnum=2)
+    stride_o3_pctiles = extract_pctiles(stride_input_o3, 1, 5, 25, 50, 75, 99)
     
-    stride_skew = stride_roroc[:,:,1:] - stride_roroc[:,:,:-1]
-    skew_min, skew_max, skew_mean, skew_var = extract_stats(stride_skew, axnum=2)
-    stride_skew_pctiles = extract_pctiles(stride_skew, 1, 5, 25, 50, 75, 99)
+    stride_o4_min, stride_o4_max, stride_o4_mean, stride_o4_var = extract_stats(stride_input_o4, axnum=2)
+    stride_o4_pctiles = extract_pctiles(stride_input_o4, 1, 5, 25, 50, 75, 99)
     
-    stride_kurt = stride_skew[:,:,1:] - stride_skew[:,:,:-1]
-    kurt_min, kurt_max, kurt_mean, kurt_var = extract_stats(stride_kurt, axnum=2)
-    kurt_pctiles = extract_pctiles(stride_kurt, 1, 5, 25, 50, 75, 99)
+    stride_o5_min, stride_o5_max, stride_o5_mean, stride_o5_var = extract_stats(stride_input_o5, axnum=2)
+    stride_o5_pctiles = extract_pctiles(stride_input_o5, 1, 5, 25, 50, 75, 99)
     
-    stft = to_stft(tens, timesteps, time_pool, time_pool)
+    stft = to_stft(tens, timesteps, time_pool, time_pool, dtype)
     _, top_freq_indices = tf.math.top_k(stft, k=3)
-    freq_embeddings = tf.get_variable('frequency_embeddings', [stft.shape[-1], 8], dtype=tf.float64)
+    freq_embeddings = tf.get_variable('frequency_embeddings', [stft.shape[-1], 8], dtype=dtype)
     top_freq_embeddings = tf.nn.embedding_lookup(freq_embeddings, top_freq_indices)
     top_freq_embeddings = tf.reshape(top_freq_embeddings, [-1, num_splits, top_freq_indices.shape[-1] * freq_embeddings.shape[-1]])
     
-    print('stride_min', stride_min)
-    print('stride_max', stride_max)
-    print('stride_mean', stride_mean)
-    print('stride_var', stride_var)
-    print('stride_pctiles', stride_pctiles)
-    print('stride_minroc', stride_minroc)
-    print('stride_maxroc', stride_maxroc)
-    print('stride_meanroc', stride_meanroc)
-    print('stride_varroc', stride_varroc)
-    print('stride_roc_pctiles', stride_roc_pctiles)
-    print('stride_minroroc', stride_minroroc)
-    print('stride_maxroroc', stride_maxroroc)
-    print('stride_meanroroc', stride_meanroroc)
-    print('stride_varroroc', stride_varroroc)
-    print('stft', stft)
-    print('top_freq_indices', top_freq_indices)
-    print('top_freq_embeddings', top_freq_embeddings)
-    
-    stride_input = tf.stack([stride_min, stride_max, stride_mean, stride_var,
-                             *tf.unstack(stride_pctiles, axis=2),
-                             stride_minroc, stride_maxroc, stride_meanroc, stride_varroc,
-                             *tf.unstack(stride_roc_pctiles, axis=2),
-                             stride_minroroc, stride_maxroroc, stride_meanroroc, stride_varroroc,
-                             *tf.unstack(stride_roc_pctiles, axis=2),
-                             skew_min, skew_max, skew_mean, skew_var,
-                             *tf.unstack(stride_skew_pctiles, axis=2),
-                             kurt_min, kurt_max, kurt_mean, kurt_var,
-                             *tf.unstack(kurt_pctiles, axis=2),
+    stride_input = tf.stack([stride_o1_min, stride_o1_max, stride_o1_mean, stride_o1_var,
+                             *tf.unstack(stride_o1_pctiles, axis=2),
+                             stride_o2_min, stride_o2_max, stride_o2_mean, stride_o2_var,
+                             *tf.unstack(stride_o2_pctiles, axis=2),
+                             stride_o3_min, stride_o3_max, stride_o3_mean, stride_o3_var,
+                             *tf.unstack(stride_o3_pctiles, axis=2),
+                             stride_o4_min, stride_o4_max, stride_o4_mean, stride_o4_var,
+                             *tf.unstack(stride_o4_pctiles, axis=2),
+                             stride_o5_min, stride_o5_max, stride_o5_mean, stride_o5_var,
+                             *tf.unstack(stride_o5_pctiles, axis=2),
                              *tf.unstack(top_freq_embeddings, axis=2),
                             ], axis=2)
     return stride_input
