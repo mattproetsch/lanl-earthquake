@@ -17,10 +17,10 @@ def to_stft(tens, timesteps, window_size, window_step, dtype):
     stft_input = tf.contrib.signal.stft(stft_input, frame_length=window_size,
                                         frame_step=window_step, pad_end='None', name='stft_op')
     stft_input = tf.real(stft_input * tf.conj(stft_input))
-    log_offset = 1e-6
-    stft_input = tf.log(stft_input + log_offset)  # take log power, as is tradition
+    # log_offset = 1e-6
+    #stft_input = tf.log(stft_input + log_offset)  # take log power, as is tradition
     stft_input = tf.cast(stft_input, dtype)
-    tf.summary.histogram('stft_input', stft_input)
+    # tf.summary.histogram('stft_input', stft_input)
     print('stft_input', stft_input)
     return stft_input
 
