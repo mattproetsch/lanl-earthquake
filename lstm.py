@@ -39,6 +39,7 @@ class LSTM(Loggable):
 
 
     def _batch_norm(self, tens, name):
+        self._log('CANCELED_batch_norm', 'tens', tens)
         return tens
         return tf.layers.batch_normalization(tens, name=name, training=self.training)
 

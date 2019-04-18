@@ -1,7 +1,6 @@
 import tensorflow as tf
 import numpy as np
 from hooks import SlimVarAnalyzer
-from process_inputs import to_timepool
 import re
 from lstm import LSTM
 from utils import Loggable, clean_varname
@@ -64,7 +63,7 @@ class DenseNet(Loggable):
 
 
     def _batch_norm(self, tens, name):
-        return tens
+        #return tens
         return tf.layers.batch_normalization(tens, name=name, training=self.training)
 
 
@@ -160,7 +159,6 @@ class DenseNet(Loggable):
         return x
 
 
-
 def densenet_model_fn(features, labels, mode, params):
     print(params)
     batch_size = params['batch_size']
@@ -194,26 +192,30 @@ def densenet_model_fn(features, labels, mode, params):
 
     training = mode == tf.estimator.ModeKeys.TRAIN
 
-
     # extract input
+    print('features', features)
     input_column_features = tf.feature_column.input_layer(features, feature_columns)
-    with tf.variable_scope('input_ops'):
-        if time_pool == 1:
-            input_column_features = tf.cast(tf.expand_dims(input_column_features, axis=2), dtype=dtype)
-        else:
-            input_column_features = to_timepool(input_column_features, timesteps, time_pool, dtype)
+    print('input_column_features', input_column_features)
+    tf.print('features', features)
+    tf.print('input_column_features', input_column_features)
+    input_column_features = tf.reshape(input_column_features, [-1, int(timesteps/time_pool), 66])
+    print('reshape input_column_features', input_column_features)
     # create and run network
     with tf.device('/gpu:0'):
         #DEBUG = True
         dense_net = DenseNet(growth_rate, layer_sizes, layer_dilations, layer_kernel_sizes, training, dropout_rate,
                              theta, dense_size, with_output_layer=not use_lstm, dtype=dtype, debug=DEBUG)
-        results = dense_net(input_column_features)
-        print('results: ', results)
+        densenet_results = dense_net(input_column_features)
+        print('densenet_results: ', densenet_results)
         if use_lstm:
             lstm = LSTM(lstm_layers, lstm_units, training,
                         dense_units=dense_size, dropout=lstm_dropout, dtype=dtype, debug=DEBUG)
-            results = lstm(results)
+            lstm_results = lstm(densenet_results)
+            print('lstm_results: ', lstm_results)
 
+    results = lstm_results if use_lstm else densenet_results
+    tf.summary.histogram('VAR_results_densenet', densenet_results)
+    tf.summary.histogram('VAR_results_lstm', lstm_results)
     target = tf.cast(labels[:,-1], dtype=dtype)
     eval_metrics = {}
     print('results', results)
@@ -230,7 +232,7 @@ def densenet_model_fn(features, labels, mode, params):
     with tf.variable_scope('loss_sse'):
         # calculate sum of squared errors
         loss = tf.reduce_sum(tf.square(target - results), name='loss_sse')
-        # loss += tf.reduce_sum(tf.square(input_feats - results), name='loss_ae')
+        # loss += tf.reduce_sum(tf.square(input_feats - results), name='loss_ae')  # use weight_decay instead
         l2_penalty = tf.cast(tf.train.exponential_decay(lambda_l2_reg,
                                                         tf.train.get_global_step(),
                                                         600,
@@ -244,8 +246,9 @@ def densenet_model_fn(features, labels, mode, params):
                         or "bias" in tf_var.name)
         )
         loss += l2
-        tf.summary.scalar('l2_penalty', l2_penalty)
-        tf.summary.scalar('l2', l2)
+        # tf.summary.scalar('l2_penalty', l2_penalty)
+        # tf.summary.scalar('l2', l2)
+        tf.summary.histogram('loss', loss)
 
     # Compute evaluation metrics.
     mse_op = tf.metrics.mean_squared_error(labels=target, #labels=input_feats[:,-1]
@@ -294,12 +297,10 @@ def densenet_model_fn(features, labels, mode, params):
             grad_dtypes = [x[0].dtype for x in gvps]
             gradients = [tf.cast(x[0], dtype) for x in gvps]
             clipped, _ = tf.clip_by_global_norm(gradients, grad_clip)
-            tf.summary.histogram('grad_norm', tf.global_norm(clipped))
             # this shows activations and gradients for all variables... but we have too many in DenseNet.
             #for x, y in zip(clipped, tfvars):
             #    tf.summary.histogram('VAR_' + clean_varname(str(y)), y)
             #    tf.summary.histogram('GRAD_' + clean_varname(str(y)), x)
-            tf.summary.histogram('VAR_results', results)
             clipped = [tf.cast(g, grad_dtypes[i]) for i, g in enumerate(clipped)]
             train_op = optimizer.apply_gradients(zip(clipped, tfvars), global_step=tf.train.get_global_step())
             #train_op = optimizer.minimize(loss, global_step=tf.train.get_global_step())
