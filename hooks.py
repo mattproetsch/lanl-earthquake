@@ -44,7 +44,7 @@ class ModelStepTrackerHook(tf.train.SessionRunHook):
     def after_run(self, run_context, run_values):
         self._steps += 1
         self._step_needs_update = True
-        
+
 
 class SlimVarAnalyzer(tf.train.SessionRunHook):
     """
